@@ -229,6 +229,8 @@ class Qwen2VLSFTToolTrainer(Trainer):
         inputs.to(model.device)
         logits = model(**inputs).logits 
         input_ids = inputs.input_ids
+        
+        # import pdb; pdb.set_trace()  # 断点5: VLM输出 - 查看logits和预测结果
          # (B, L, V)
         if weight is not None:
             answer = self.processing_class.tokenizer.encode("answer", add_special_tokens=False)[0]
@@ -367,6 +369,7 @@ class Qwen2VLSFTToolTrainer(Trainer):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
 
+        # import pdb; pdb.set_trace()  # 断点4: compute_loss开始，查看输入batch
     
         device = self.accelerator.device
         message_lists = [x["message_list"] for x in inputs]
@@ -379,6 +382,8 @@ class Qwen2VLSFTToolTrainer(Trainer):
         messages = message_lists
 
         inputs = self.vlm_module.prepare_from_msg_2_vlm_inputs(self.processing_class,messages)
+        
+        # import pdb; pdb.set_trace()  # 断点4.5: VLM输入准备完成 - 查看inputs结构
 
 
 

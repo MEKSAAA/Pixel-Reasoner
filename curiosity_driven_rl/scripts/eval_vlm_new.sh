@@ -20,7 +20,7 @@ export CUDA_LAUNCH_BLOCKING=1
 export HOST_IP=0.0.0.0
 export VLLM_HOST_IP=0.0.0.0
 
-working_dir=${working_dir:-"/path/to/PixelReasoner"}
+working_dir=${working_dir:-"/NEW_EDS/miaojw/projects/Pixel-Reasoner"}
 cd $working_dir
 export HF_ENDPOINT=https://hf-mirror.com
 nnode=$WORLD_SIZE
@@ -54,10 +54,6 @@ PRETRAIN_MODEL=${policy}
 savefolder=${savefolder:-"eval_results"}
 SAVE_PATH=$working_dir/${savefolder}/$save_name
 mkdir -p "${SAVE_PATH}"
-
-# python=/home/ma-user/anaconda3/envs/rethinker/bin/python
-# source /home/ma-user/anaconda3/bin/activate
-# conda activate rethinker
 
 
 
@@ -104,7 +100,10 @@ else
 fi
 
 LD_LIBRARY_PATH_VALUE=$nvj_path:$LD_LIBRARY_PATH
-# LD_LIBRARY_PATH_VALUE=/path/to/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH
+
+export RAY_TMPDIR=/NEW_EDS/miaojw/ray_tmp
+export TMPDIR=/NEW_EDS/miaojw/ray_tmp
+export RAY_USAGE_STATS_ENABLED=0
 
 RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"MAX_PIXELS\": \"$MAX_PIXELS\", \"MIN_PIXELS\": \"$MIN_PIXELS\", \"RAY_DEBUG\": \"legacy\", \"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
 

@@ -6,8 +6,12 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 # export NCCL_P2P_DISABLE=1
 # export NCCL_DEBUG=INFO
 
-RUN_NAME=test
+
+RUN_NAME=pr_sft_qwen25vl3b_v1
 export LOG_PATH="./debug_log_$RUN_NAME.txt"
+
+MODEL_DIR=/NEW_EDS/JJ_Group/miaojw/models/Qwen2.5-VL-3B-Instruct
+DATA_DIR=/NEW_EDS/JJ_Group/miaojw/datasets/pixel_reasoner_sft
 
 python -m torch.distributed.run --nproc_per_node="8" \
     --nnodes="1" \
@@ -17,8 +21,8 @@ python -m torch.distributed.run --nproc_per_node="8" \
     instruction_tuning/sft_tool.py \
     --deepspeed instruction_tuning/local_scripts/zero2.json \
     --output_dir output/$RUN_NAME \
-    --model_name_or_path  \
-    --datasetpath  \
+    --model_name_or_path $MODEL_DIR \
+    --datasetpath $DATA_DIR \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.1 \
     --eval_strategy no \

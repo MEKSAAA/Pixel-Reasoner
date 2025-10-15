@@ -168,7 +168,9 @@ Zoom in on the image based on the bounding box coordinates. It is useful when th
 
 
         return cropped_img 
-    
+
+
+   
 
 def extract_qwen_query_and_response(input_text):
     # Split the input text by the assistant's start token
@@ -1144,6 +1146,7 @@ tool_start = '<tool_call>'
 
 def parse_last_tool(output_text):
     # print([output_text])
+    # import pdb; pdb.set_trace() # 3.查看output_text
     return json.loads(output_text.split(tool_start)[-1].split(tool_end)[0])
 
 
@@ -1168,6 +1171,7 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
 
 do_controlled_rectify = True
 def execute_tool(images, rawimages, args, toolname, is_video, function=None):
+    # import pdb; pdb.set_trace() # 4.查看images,rawimages,args,toolname,is_video,function
     if toolname=='select_frames':
         assert is_video, "Execution Error: You attempted to `select_frames` from **image** not **video**. You should use `crop_image_normalized` instead for inspecting **image**."
         tgt = args['target_frames']
@@ -2031,7 +2035,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     # rq = regularize_text(entry['content'][-1]['text']) 
                     
                     responses = self.q2r[qid][:args.n_samples_per_prompt]
-                    # import pdb; pdb.set_trace()
+                    # # import pdb; pdb.set_trace()
                     cleaned_chat = []
                     for entry in chat:
                         if 'content' in entry:
@@ -2240,6 +2244,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # rsp.endswith(tool_end) also fine
                 last_string = rsp[-len(tool_end)-10:] if len(rsp)>len(tool_end)+10 else rsp
                 require_tool = last_string.endswith(tool_end) # check whether tool trigger in out_ids 
+                # import pdb; pdb.set_trace() # 1.查看require_tool
                 cur_tokens_in = len(all_outputs[out_idx].prompt_token_ids)
                 cur_tokens_out = len(all_outputs[out_idx].outputs[0].token_ids)
                 cur_tokens = cur_tokens_in + cur_tokens_out
@@ -2269,10 +2274,12 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 temp_error_flags[out_idx] = False
                 tool_params = None
                 try:
+                    # import pdb; pdb.set_trace() # 2.查看tool_params
                     tool_params = parse_last_tool(qatext) 
                     tool_name = tool_params['name']
                     tool_args = tool_params['arguments']
                     
+                    # import pdb; pdb.set_trace() # 3.查看raw_result
                     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call)
                     if tool_name=='select_frames': 
                         
@@ -2750,25 +2757,25 @@ if __name__ == "__main__":
     sol = "To determine the third step taken if you have suffered from the signs of COVID-19, let's follow the flowchart step by step:\n\n1. **Step 1**: Start isolating.\n2. **Step 2**: Book a test.\n3. **Step 3**: Share contacts via NHS Test and Trace.\n\nThe flowchart clearly indicates that if you have symptoms, you should start by isolating, then book a test, and finally share your contacts with NHS Test and Trace.\n\nTherefore, the third step taken if you have suffered from the signs of COVID-19 is:\n\n\\boxed{Share contacts via NHS Test and Trace}"
     gt = ["\\boxed{share contacts}"]
     print(rule_reward(sol, gt, "<|im_end|>", "none", requires_box=True))
-    # outputs = '<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "crop_image_normalized", "description": "Zoom in on the image based on the bounding box coordinates. It is useful when the object or text in the image is too small to be seen.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is 1.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><image>\nWhat animal is depicted on the Woolshops Shopping Centre sign?\nchoices:\nA: Lion  \nB: Sheep  \nC: Tiger  \nD: Elephant\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>assistant\nThe image shows a street with cobblestone pavements, shops, and a signboard for Woolshops Shopping Centre on the left side. The signboard has an animal depicted on it.\n\nTo identify the animal on the sign, I will zoom in on the Woolshops Shopping Centre sign.\n\n<tool_call>\n{"name": "crop_image_normalized", "arguments": {"bbox_2d": [0.1, 0.2, 0.3, 0.4], "target_image":1}}\n</tool_call>'
-    # print(parse_last_tool(outputs))
-    ################
-    # from transformers import AutoProcessor
-    # path = "/home/ma-user/work/haozhe/muze/VLM-R1/src/open-r1-multimodal/output/SFT_Qwen_Z2ORCORRECT"
-    # processor = AutoProcessor.from_pretrained(path)
-    # tools = [CropImageNormalized().function]
-    # prompt_maker = NousFnCallPrompt()
-    # messages = ["[{\"role\": \"user\", \"content\": [{\"type\": \"image\", \"image\": \"/home/ma-user/work/haozhe/muze/modelartsdata/sa1brl/5394/1.jpg\"}, {\"type\": \"text\", \"text\": \"<image>\\nWhat animal is depicted on the Woolshops Shopping Centre sign?\\nchoices:\\nA: Lion  \\nB: Sheep  \\nC: Tiger  \\nD: Elephant\\n\\nPlease reason step by step, and put your final answer within \\\\boxed{}.\"}]}]"]*5
-    # messages = get_required_messages(messages)
-    # # print(messages[0])
-    # messages = [prompt_maker.preprocess_fncall_messages(
-    #                 messages=msg,
-    #                 functions=tools, 
-    #                 lang=None
-    #             ) for msg in messages]
-    # # print('=========')
-    # toolappended_messages = [[x.model_dump() for x in conversations] for conversations in messages]
-    # returns = processor.apply_chat_template(toolappended_messages, tokenize=False, add_generation_prompt=True)
-    # for ii in returns:
-    #     print(ii)
-    #     print('======')
+    outputs = '<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "crop_image_normalized", "description": "Zoom in on the image based on the bounding box coordinates. It is useful when the object or text in the image is too small to be seen.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is 1.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><image>\nWhat animal is depicted on the Woolshops Shopping Centre sign?\nchoices:\nA: Lion  \nB: Sheep  \nC: Tiger  \nD: Elephant\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>assistant\nThe image shows a street with cobblestone pavements, shops, and a signboard for Woolshops Shopping Centre on the left side. The signboard has an animal depicted on it.\n\nTo identify the animal on the sign, I will zoom in on the Woolshops Shopping Centre sign.\n\n<tool_call>\n{"name": "crop_image_normalized", "arguments": {"bbox_2d": [0.1, 0.2, 0.3, 0.4], "target_image":1}}\n</tool_call>'
+    print(parse_last_tool(outputs))
+    ###############
+    from transformers import AutoProcessor
+    path = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/PixelReasoner-WarmStart/checkpoint-492"
+    processor = AutoProcessor.from_pretrained(path)
+    tools = [CropImageNormalized().function]
+    prompt_maker = NousFnCallPrompt()
+    messages = ["[{\"role\": \"user\", \"content\": [{\"type\": \"image\", \"image\": \"/home/ma-user/work/haozhe/muze/modelartsdata/sa1brl/5394/1.jpg\"}, {\"type\": \"text\", \"text\": \"<image>\\nWhat animal is depicted on the Woolshops Shopping Centre sign?\\nchoices:\\nA: Lion  \\nB: Sheep  \\nC: Tiger  \\nD: Elephant\\n\\nPlease reason step by step, and put your final answer within \\\\boxed{}.\"}]}]"]*5
+    messages = get_required_messages(messages)
+    print(messages[0])
+    messages = [prompt_maker.preprocess_fncall_messages(
+                    messages=msg,
+                    functions=tools, 
+                    lang=None
+                ) for msg in messages]
+    # print('=========')
+    toolappended_messages = [[x.model_dump() for x in conversations] for conversations in messages]
+    returns = processor.apply_chat_template(toolappended_messages, tokenize=False, add_generation_prompt=True)
+    for ii in returns:
+        print(ii)
+        print('======')

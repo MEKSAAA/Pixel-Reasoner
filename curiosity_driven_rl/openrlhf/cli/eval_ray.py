@@ -241,6 +241,7 @@ def train(args):
             modelfamily=args.modelfamily
         )
     
+    import pdb; pdb.set_trace()   # 1.查看变量
     evaluator.evaluate(0)
     
 

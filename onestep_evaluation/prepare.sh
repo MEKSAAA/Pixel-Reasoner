@@ -1,8 +1,11 @@
 set -x
 dataname=${dataname:-"${1}"} # hfname VStar-EvalData-PixelReasoner
-newdataname=${newdataname:-""} # this is the downloaded parquet file name
-hfuser=${hfuser:-"TIGER-Lab"}
-working_dir=/home/ma-user/work/haozhe/workspace/lmm-r1/pixelreasoner/curiosity_driven_rl
+newdataname=${newdataname:-"vstar"} # this is the downloaded parquet file name
+hfuser=${hfuser:-"JasperHaozhe"}
+working_dir=/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl
+
+export HF_ENDPOINT=https://hf-mirror.com
+
 if [[ ! -f "hfd.sh" ]]; then
     echo "downloading hfd.sh"
     

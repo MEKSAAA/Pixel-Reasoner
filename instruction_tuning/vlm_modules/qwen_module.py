@@ -76,13 +76,36 @@ class Qwen2VLModule(VLMBaseModule):
     def prepare_from_msg_2_vlm_inputs(self,processor:AutoProcessor,messages,add_wait_IV:bool=False,video_max_pixels:int=420*360,**kwargs)->dict[str,Union[torch.Tensor,Any]]:
         if add_wait_IV:
             messages[0].append({'role':'user', 'content':[{'image':'/home/ma-user/work/haozhe/muze/modelartsdata/2000-4000/2002/2.jpg'},{'video':['/home/ma-user/work/haozhe/muze/modelartsdata/2000-4000/2002/2.jpg']}]})
+        
+        # 预处理：将图片列表展开为多个单独的图片项
+        # messages 是批次级别的：[[msg1, msg2, ...], [msg1, msg2, ...], ...]
+        for sample_messages in messages:  # 遍历批次中的每个样本
+            for message in sample_messages:  # 遍历每个样本的消息
+                if 'content' in message:
+                    new_content = []
+                    for content_item in message['content']:
+                        if 'image' in content_item:
+                            # 如果 image 是列表，展开为多个单独的 content 项
+                            if isinstance(content_item['image'], list):
+                                for img_path in content_item['image']:
+                                    new_content.append({'image': img_path})
+                            else:
+                                # 如果已经是字符串，直接添加
+                                new_content.append(content_item)
+                        elif 'video' in content_item:
+                            # 处理 video：如果是列表，需要包装
+                            video = content_item['video']
+                            if isinstance(video, list):
+                                video_content = {'video': video, 'max_pixels': video_max_pixels}
+                            else:
+                                video_content = content_item
+                            new_content.append(video_content)
+                        else:
+                            # 非图片/视频的 content（如 text）直接添加
+                            new_content.append(content_item)
+                    message['content'] = new_content
+        
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        for message in messages:
-            if 'video' in message[1]['content'][1]:
-                video = message[1]['content'][1]['video']
-                content = {'video':video,'max_pixels':video_max_pixels}
-                message[1]['content'][1] = content
-            
 
         image_inputs, video_inputs, video_kwargs = process_vision_info(messages, return_video_kwargs=True)
         def add_think_tag(text:str)->str:

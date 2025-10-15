@@ -1,5 +1,5 @@
 benchmark=vstar
-export working_dir="/home/ma-user/work/haozhe/workspace/lmm-r1/pixelreasoner/curiosity_driven_rl"
+export working_dir="/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl"
 export policy="/home/ma-user/work/haozhe/workspace/lmm-r1/toolbest/newbest"
 export savefolder=tooleval
 export nvj_path="/home/ma-user/anaconda3/envs/lmm/lib/python3.10/site-packages/nvidia/nvjitlink/lib" # in case the system cannot fiind the nvjit library
