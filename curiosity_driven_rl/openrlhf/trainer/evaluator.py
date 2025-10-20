@@ -187,11 +187,11 @@ class Evaluator(ABC):
             else: needed = 0
             print(f"!!!! ========== eval progress {idx}/{len(dataloader)} ==========")
             
-            import pdb; pdb.set_trace()   # 2.查看prompts
+            # import pdb; pdb.set_trace()   # 2.查看prompts
 
             exp_list = self.get_explist_from_prompts(args, ep, rand_prompts, is_eval=True, eval_step=global_step)
             
-            import pdb; pdb.set_trace()   # 3.查看exp_list,生成结果
+            # import pdb; pdb.set_trace()   # 3.查看exp_list,生成结果
 
             for i, experience in enumerate(exp_list):
                 self.replay_buffer.append_split(experience, is_eval=True)

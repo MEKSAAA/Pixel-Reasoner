@@ -1,18 +1,32 @@
 set -euo pipefail
 export DEBUG_MODE="true"
-RUN_NAME=ad_sft_qwen25vl7b_v2         # 保持与八卡相同名称（如需区分可自行加后缀）
-export LOG_PATH="./debug_log_${RUN_NAME}.txt"
+RUN_NAME=ad_sft_qwen25vl7b_v3         # 保持与八卡相同名称（如需区分可自行加后缀）
+export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-7B-Instruct
-DATA_JSON=/NEW_EDS/miaojw/projects/CLEAN/rewrite_training_samples.json
+DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_tool_train.json
 
-export CUDA_VISIBLE_DEVICES=1,2,4,5
+
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 export WANDB_DISABLED=true      
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 unset TRANSFORMERS_NO_FLASH_ATTENTION
 
-torchrun --nproc_per_node=4 instruction_tuning/sft_tool.py \
+# NCCL 配置：解决超时和通信问题
+export NCCL_DEBUG=INFO
+# export NCCL_IB_DISABLE=1
+export NCCL_P2P_DISABLE=1
+# export NCCL_SOCKET_IFNAME=lo
+# export NCCL_TIMEOUT=180
+# export NCCL_BLOCKING_WAIT=1
+
+python -m torch.distributed.run --nproc_per_node=4 \
+  --nnodes="1" \
+  --node_rank="0" \
+  --master_addr="127.0.0.1" \
+  --master_port="29510" \
+  instruction_tuning/sft_tool.py \
   --deepspeed instruction_tuning/local_scripts/zero2.json \
   --output_dir output/${RUN_NAME} \
   --model_name_or_path ${MODEL_DIR} \
@@ -30,7 +44,7 @@ torchrun --nproc_per_node=4 instruction_tuning/sft_tool.py \
   --report_to none \
   --gradient_checkpointing true \
   --attn_implementation flash_attention_2 \
-  --num_train_epochs 6 \
+  --num_train_epochs 7 \
   --run_name ${RUN_NAME} \
   --save_strategy epoch \
   --save_steps 100 \

@@ -7,13 +7,13 @@ export NCCL_IB_DISABLE=1
 
 
 export DEBUG_MODE="true"
-RUN_NAME=ad_sft_qwen25vl3b_v1         # 保持与八卡相同名称（如需区分可自行加后缀）
-export LOG_PATH="./debug_log_${RUN_NAME}.txt"
+RUN_NAME=ad_sft_qwen25vl7b_v4         # 保持与八卡相同名称（如需区分可自行加后缀）
+export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-7B-Instruct
-DATA_JSON=/NEW_EDS/miaojw/projects/CLEAN/rewrite_training_samples.json
+DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_tool_train.json
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=5
 export WANDB_DISABLED=true      
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -42,7 +42,7 @@ python instruction_tuning/sft_tool.py \
     --report_to none \
     --gradient_checkpointing true \
     --attn_implementation flash_attention_2 \
-    --num_train_epochs 5 \
+    --num_train_epochs 8 \
     --run_name ${RUN_NAME} \
     --save_strategy epoch \
     --save_steps 100 \

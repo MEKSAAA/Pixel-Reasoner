@@ -1,0 +1,21 @@
+benchmark=mvtec
+export working_dir="/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl"
+
+export policy="/NEW_EDS/miaojw/projects/Pixel-Reasoner/output/ad_sft_qwen25vl7b_v3/checkpoint-931"
+
+export savefolder=eval_ad_qwen25vl7b
+export nvj_path="/path/to/nvidia/nvjitlink/lib" # in case the system cannot fiind the nvjit library
+############
+export sys=anomaly_vcot # define the system prompt
+export MIN_PIXELS=401408
+export MAX_PIXELS=4014080 # define the image resolution
+export eval_bsz=64 # vllm will processes this many queries 
+export tagname=eval_ad_qwen25vl7b
+# export testdata="${working_dir}/data/${benchmark}.parquet"
+export testdata="/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_test.json"
+export num_vllm=8
+export num_gpus=8
+
+export actor_ngpus=0  
+
+bash ${working_dir}/scripts/eval_vlm_new.sh

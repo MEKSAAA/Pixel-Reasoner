@@ -815,14 +815,98 @@ def normalize_answer(answer):
     if "cm" in answer: answer = answer.replace("cm","")
     # if "^\\circ" in answer: answer = answer.replace("^\\circ","")
     # if "a.m." in answer: answer = answer.replace("a.m.","")
-    return answer 
+    return answer
 
-def handle_boxed(sol, gt, eostoken, format_type, requires_box=False):
+def verify_anomaly_detection(sol, gt):
+    """
+    验证异常检测任务的答案
+    模型输出格式: <answer>{"anomaly_present": true/false, ...}</answer>
+    Ground truth: true/false (布尔值)
+    """
+    res = 0.0
+    try:
+        # 查找 <answer> 标签
+        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        if not found:
+            print(f"!!!! [debug] No <answer> tag found in solution")
+            return -1.0
+        
+        answer_str = found.group(1).strip()
+        
+        # 尝试解析JSON
+        try:
+            answer_json = json.loads(answer_str)
+        except json.JSONDecodeError as e:
+            print(f"!!!! [debug] JSON parsing error: {e}, answer_str: {answer_str}")
+            return -1.0
+        
+        # 检查是否包含 anomaly_present 字段
+        if "anomaly_present" not in answer_json:
+            print(f"!!!! [debug] 'anomaly_present' field not found in answer JSON")
+            return -1.0
+        
+        # 提取预测值
+        pred = answer_json["anomaly_present"]
+        if not isinstance(pred, bool):
+            print(f"!!!! [debug] 'anomaly_present' is not boolean: {pred}")
+            return -1.0
+        
+        # 标准化 ground truth
+        if isinstance(gt, bool):
+            gt_bool = gt
+        elif isinstance(gt, str):
+            gt_bool = gt.lower() in ['true', '1', 'yes']
+        else:
+            gt_bool = bool(gt)
+        
+        # 比较预测和真实值
+        res = 1.0 if pred == gt_bool else 0.0
+        
+    except Exception as e:
+        print(f"!!!! [debug] Exception in verify_anomaly_detection: {e}")
+        res = -1.0
+    
+    return res
+
+def is_anomaly_detection_task(gt, sol=None, qid=None):
+    """
+    判断是否为异常检测任务
+    可以通过以下方式判断：
+    1. gt 是布尔类型
+    2. qid 包含特定前缀（如 mvtec_）
+    3. solution 包含 anomaly_present 字段
+    """
+    # 方式1: 检查 gt 类型
+    # if isinstance(gt, bool):
+    #     return True
+    
+    # 方式2: 检查 qid
+    if qid and isinstance(qid, str):
+        if 'mvtec' in qid.lower() or 'anomaly' in qid.lower():
+            return True
+    
+    # 方式3: 检查 solution 格式
+    if sol and 'anomaly_present' in sol:
+        return True
+    
+    return False 
+
+def handle_boxed(sol, gt, eostoken, format_type, requires_box=False, qid=None):
     # print(sol)
     # print('!!!! debug', gt)
     norepeat = None
     usefmt = None
     res = 0.0
+    
+    # 检查是否为异常检测任务
+    if is_anomaly_detection_task(gt, sol, qid):
+        # 使用异常检测专用验证逻辑
+        res = verify_anomaly_detection(sol, gt)
+        # 对于异常检测任务，简化格式检查
+        norepeat = True  # 假设格式正确
+        usefmt = True if "<answer>" in sol and "</answer>" in sol else False
+        return norepeat, usefmt, res
+    
     # endstr and eos token
     index = sol.find(endstr)
     num_end = len(eostoken)
@@ -935,6 +1019,14 @@ def rule_reward(sol, gt, eostoken, format_type, requires_box, *args):
     # if not valid: 
     #     pass 
     # else: 
+    
+    # 检查是否为异常检测任务（gt是布尔值）
+    if isinstance(gt, bool):
+        # 异常检测任务：直接传递原始gt，不转换
+        norepeat, usefmt, res = handle_boxed(sol, gt, eostoken, format_type, requires_box=requires_box)
+        return valid, norepeat, usefmt, error_info, res
+    
+    # 数学任务：原有逻辑
     if isinstance(gt, list):
         gt = [xx.lower() for xx in gt]
         has_percent = None
@@ -1008,6 +1100,13 @@ def rule_reward_with_code(sol, gt, eostoken, format_type, executor):
     norepeat = None
     usefmt = None
     res = 0.0
+    
+    # 检查是否为异常检测任务
+    if isinstance(gt, bool):
+        # 异常检测任务不使用代码，直接验证答案
+        norepeat, usefmt, res = handle_boxed(sol, gt, eostoken, format_type)
+        return valid, norepeat, usefmt, error_info, res
+    
     if eostoken not in sol: 
         valid = False
         return valid, norepeat, usefmt, error_info, res 
@@ -1053,6 +1152,15 @@ def batch_rule_reward_with_code(sols, gts, eostoken, format_type, executor, requ
         usefmt = None
         res = 0.0
         usecode = None 
+        
+        # 检查是否为异常检测任务
+        if isinstance(gt, bool):
+            usecode = False
+            norepeat, usefmt, res = handle_boxed(sol, gt, eostoken, format_type, requires_box=requires_box)
+            ret = valid, norepeat, usefmt, error_info, usecode, res 
+            rets.append(ret)
+            continue
+        
         if eostoken not in sol: 
             valid = False
             ret = valid, norepeat, usefmt, error_info, usecode, res 
@@ -1588,7 +1696,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         
         format_type = getattr(self.strategy.args, "format", None)
         sysprompt = getattr(self.strategy.args, "system_prompt", None)
-        requires_box = False if self.parse_code or sysprompt=='dpsk' else True # sysprompt !='autocode'
+        # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
+        requires_box = False if self.parse_code or sysprompt in ['dpsk', 'anomaly_vcot', 'anomaly_notool'] else True
         rets = self.rule_reward_func(solutions, gts, self.tokenizer.eos_token, format_type, self.executor, requires_box)
         return rets 
         
@@ -1691,7 +1800,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             
             format_type = getattr(self.strategy.args, "format", None)
             sysprompt = getattr(self.strategy.args, "system_prompt", None)
-            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger'] else True # sysprompt !='autocode'
+            # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
+            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger','anomaly_vcot','anomaly_notool'] else True
             print(f'requires_box={requires_box}')
             # num = len(questions)
             
@@ -2757,25 +2867,25 @@ if __name__ == "__main__":
     sol = "To determine the third step taken if you have suffered from the signs of COVID-19, let's follow the flowchart step by step:\n\n1. **Step 1**: Start isolating.\n2. **Step 2**: Book a test.\n3. **Step 3**: Share contacts via NHS Test and Trace.\n\nThe flowchart clearly indicates that if you have symptoms, you should start by isolating, then book a test, and finally share your contacts with NHS Test and Trace.\n\nTherefore, the third step taken if you have suffered from the signs of COVID-19 is:\n\n\\boxed{Share contacts via NHS Test and Trace}"
     gt = ["\\boxed{share contacts}"]
     print(rule_reward(sol, gt, "<|im_end|>", "none", requires_box=True))
-    outputs = '<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "crop_image_normalized", "description": "Zoom in on the image based on the bounding box coordinates. It is useful when the object or text in the image is too small to be seen.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is 1.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><image>\nWhat animal is depicted on the Woolshops Shopping Centre sign?\nchoices:\nA: Lion  \nB: Sheep  \nC: Tiger  \nD: Elephant\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>assistant\nThe image shows a street with cobblestone pavements, shops, and a signboard for Woolshops Shopping Centre on the left side. The signboard has an animal depicted on it.\n\nTo identify the animal on the sign, I will zoom in on the Woolshops Shopping Centre sign.\n\n<tool_call>\n{"name": "crop_image_normalized", "arguments": {"bbox_2d": [0.1, 0.2, 0.3, 0.4], "target_image":1}}\n</tool_call>'
-    print(parse_last_tool(outputs))
-    ###############
-    from transformers import AutoProcessor
-    path = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/PixelReasoner-WarmStart/checkpoint-492"
-    processor = AutoProcessor.from_pretrained(path)
-    tools = [CropImageNormalized().function]
-    prompt_maker = NousFnCallPrompt()
-    messages = ["[{\"role\": \"user\", \"content\": [{\"type\": \"image\", \"image\": \"/home/ma-user/work/haozhe/muze/modelartsdata/sa1brl/5394/1.jpg\"}, {\"type\": \"text\", \"text\": \"<image>\\nWhat animal is depicted on the Woolshops Shopping Centre sign?\\nchoices:\\nA: Lion  \\nB: Sheep  \\nC: Tiger  \\nD: Elephant\\n\\nPlease reason step by step, and put your final answer within \\\\boxed{}.\"}]}]"]*5
-    messages = get_required_messages(messages)
-    print(messages[0])
-    messages = [prompt_maker.preprocess_fncall_messages(
-                    messages=msg,
-                    functions=tools, 
-                    lang=None
-                ) for msg in messages]
-    # print('=========')
-    toolappended_messages = [[x.model_dump() for x in conversations] for conversations in messages]
-    returns = processor.apply_chat_template(toolappended_messages, tokenize=False, add_generation_prompt=True)
-    for ii in returns:
-        print(ii)
-        print('======')
+    # outputs = '<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "crop_image_normalized", "description": "Zoom in on the image based on the bounding box coordinates. It is useful when the object or text in the image is too small to be seen.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is 1.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><image>\nWhat animal is depicted on the Woolshops Shopping Centre sign?\nchoices:\nA: Lion  \nB: Sheep  \nC: Tiger  \nD: Elephant\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>assistant\nThe image shows a street with cobblestone pavements, shops, and a signboard for Woolshops Shopping Centre on the left side. The signboard has an animal depicted on it.\n\nTo identify the animal on the sign, I will zoom in on the Woolshops Shopping Centre sign.\n\n<tool_call>\n{"name": "crop_image_normalized", "arguments": {"bbox_2d": [0.1, 0.2, 0.3, 0.4], "target_image":1}}\n</tool_call>'
+    # print(parse_last_tool(outputs))
+    # ###############
+    # from transformers import AutoProcessor
+    # path = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/PixelReasoner-WarmStart/checkpoint-492"
+    # processor = AutoProcessor.from_pretrained(path)
+    # tools = [CropImageNormalized().function]
+    # prompt_maker = NousFnCallPrompt()
+    # messages = ["[{\"role\": \"user\", \"content\": [{\"type\": \"image\", \"image\": \"/home/ma-user/work/haozhe/muze/modelartsdata/sa1brl/5394/1.jpg\"}, {\"type\": \"text\", \"text\": \"<image>\\nWhat animal is depicted on the Woolshops Shopping Centre sign?\\nchoices:\\nA: Lion  \\nB: Sheep  \\nC: Tiger  \\nD: Elephant\\n\\nPlease reason step by step, and put your final answer within \\\\boxed{}.\"}]}]"]*5
+    # messages = get_required_messages(messages)
+    # print(messages[0])
+    # messages = [prompt_maker.preprocess_fncall_messages(
+    #                 messages=msg,
+    #                 functions=tools, 
+    #                 lang=None
+    #             ) for msg in messages]
+    # # print('=========')
+    # toolappended_messages = [[x.model_dump() for x in conversations] for conversations in messages]
+    # returns = processor.apply_chat_template(toolappended_messages, tokenize=False, add_generation_prompt=True)
+    # for ii in returns:
+    #     print(ii)
+    #     print('======')

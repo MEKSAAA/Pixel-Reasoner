@@ -107,8 +107,20 @@ export RAY_USAGE_STATS_ENABLED=0
 
 RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"MAX_PIXELS\": \"$MAX_PIXELS\", \"MIN_PIXELS\": \"$MIN_PIXELS\", \"RAY_DEBUG\": \"legacy\", \"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
 
+# RUNTIME_ENV_JSON="{
+#   \"env_vars\": {
+#     \"MAX_PIXELS\": \"$MAX_PIXELS\",
+#     \"MIN_PIXELS\": \"$MIN_PIXELS\",
+#     \"RAY_DEBUG\": \"legacy\",
+#     \"LD_LIBRARY_PATH\": \"$CONDA_PREFIX/lib:${NVJITLINK_DIR}:/usr/local/cuda/lib64\",
+#     \"LD_PRELOAD\": \"$CONDA_PREFIX/lib/libstdc++.so.6:$CONDA_PREFIX/lib/libgcc_s.so.1\",
+#     \"TRANSFORMERS_NO_TORCHVISION\": \"1\"
+#   }
+# }"
 
-ray_output=$(ray start --head --num-gpus ${num_gpus})
+
+
+ray_output=$(ray start --head --num-gpus ${num_gpus} --temp-dir ${RAY_TMPDIR})
 
 
 ray status
