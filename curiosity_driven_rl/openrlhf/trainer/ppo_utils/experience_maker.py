@@ -877,8 +877,8 @@ def is_anomaly_detection_task(gt, sol=None, qid=None):
     3. solution 包含 anomaly_present 字段
     """
     # 方式1: 检查 gt 类型
-    # if isinstance(gt, bool):
-    #     return True
+    if isinstance(gt, bool):
+        return True
     
     # 方式2: 检查 qid
     if qid and isinstance(qid, str):
@@ -990,6 +990,33 @@ def handle_boxed(sol, gt, eostoken, format_type, requires_box=False, qid=None):
         
                     
     return norepeat, usefmt, res 
+
+import json
+import re
+
+def _safe_str(x) -> str:
+    if x is None:
+        return ""
+    try:
+        return str(x)
+    except Exception:
+        try:
+            return json.dumps(x, ensure_ascii=False)
+        except Exception:
+            return ""
+
+def _parse_bool_from_text(text: str):
+    """把模型输出里的 yes/no 解析成 True/False；解析不了返回 None。"""
+    t = _safe_str(text).strip().lower()
+    yes_keys = ["yes", "true", "correct", "right"]
+    no_keys  = ["no", "false", "incorrect", "wrong"]
+    if any(k in t for k in yes_keys):
+        return True
+    if any(k in t for k in no_keys):
+        return False
+    return None
+
+
 
 def rule_reward(sol, gt, eostoken, format_type, requires_box, *args):
     # valid = eos & boxed 
