@@ -13,7 +13,7 @@ export MAX_PIXELS=4014080 # define the image resolution
 export eval_bsz=64 # vllm will processes this many queries 
 export tagname=eval_ad_qwen25vl7b
 
-export testdata="/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_test.json"
+export testdata="/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_test_notool.json"
 export num_vllm=8
 export num_gpus=8
 

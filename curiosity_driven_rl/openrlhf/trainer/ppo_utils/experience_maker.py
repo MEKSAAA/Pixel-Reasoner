@@ -1559,10 +1559,11 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         ###### old version
         # self.tools = [CropImageNormalized().function]
         ####### new version
-        self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
-        notool = getattr(self.strategy.args, "system_prompt", "none")=="notool"
+        # self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
+        self.operations = dict(crop_image_normalized=CropImageNormalized())
+        notool = "notool" in getattr(self.strategy.args, "system_prompt", "none")
         
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'select_frames']]
+        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized']]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
 
