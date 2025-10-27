@@ -1,13 +1,13 @@
 set -euo pipefail
 export DEBUG_MODE="true"
-RUN_NAME=ad_sft_qwen25vl7b_v3         # 保持与八卡相同名称（如需区分可自行加后缀）
+RUN_NAME=ad_sft_qwen25vl7b        # 保持与八卡相同名称（如需区分可自行加后缀）
 export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-7B-Instruct
-DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/mvtec_agent_tool_train.json
+DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train_cross345.json
 
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=3,4,6,7
 export WANDB_DISABLED=true      
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -32,19 +32,19 @@ python -m torch.distributed.run --nproc_per_node=4 \
   --model_name_or_path ${MODEL_DIR} \
   --datasetpath ${DATA_JSON} \
   --lr_scheduler_type cosine \
-  --warmup_ratio 0.1 \
+  --warmup_ratio 0.05 \
   --eval_strategy no \
   --per_device_train_batch_size 1 \
   --gradient_accumulation_steps 4 \
   --logging_steps 5 \
   --bf16 \
   --torch_dtype bfloat16 \
-  --learning_rate 1e-6 \
+  --learning_rate 2e-5 \
   --data_seed 49 \
   --report_to none \
   --gradient_checkpointing true \
   --attn_implementation flash_attention_2 \
-  --num_train_epochs 7 \
+  --num_train_epochs 10 \
   --run_name ${RUN_NAME} \
   --save_strategy epoch \
   --save_steps 100 \
