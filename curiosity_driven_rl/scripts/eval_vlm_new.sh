@@ -120,7 +120,7 @@ RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"MAX_PIXELS\": \"$
 
 
 
-ray_output=$(ray start --head --num-gpus ${num_gpus} --temp-dir ${RAY_TMPDIR})
+ray_output=$(ray start --head --num-gpus ${num_gpus} --temp-dir ${RAY_TMPDIR} --port=8399)
 
 
 ray status
