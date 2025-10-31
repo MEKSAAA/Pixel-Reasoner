@@ -363,6 +363,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt_split", type=str, default="train")
     parser.add_argument("--pretrain_data", type=str, default=None, help="HF dataset name or path")
     parser.add_argument("--eval_data", type=str, default=None, help="HF dataset name or path")
+    parser.add_argument("--eval_sample_ratio", type=float, default=None, help="Optional ratio (0-1] to subsample eval_data")
     
     parser.add_argument("--training_mode", type=str, default="train", help="HF dataset name or path")
     parser.add_argument(

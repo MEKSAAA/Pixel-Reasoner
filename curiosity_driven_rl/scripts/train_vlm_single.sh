@@ -99,9 +99,9 @@ find_interface() {
 
 RAY_MASTER_NODE_ADDRESS="0.0.0.0"
 RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
-WORLD_SIZE=1
-NODE_RANK=0
-GPUS_PER_NODE=8
+# WORLD_SIZE=1
+# NODE_RANK=0
+# GPUS_PER_NODE=2
 
 MASTER_HOST="$VC_WORKER_HOSTS"
 MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"
@@ -125,7 +125,7 @@ nvjitlink=""
 nnode=$WORLD_SIZE
 tagname=${tagname:-""}
 dataver=${dataver:-"none"}
-tag=qw-vl7b-${trainver}-${tagname}
+tag=qw-vl3b-${trainver}-${tagname}
 rule_reward=${rule:-"none"}
 sys=${sys:-"default"}
 lr=${lr:-"10"}
@@ -150,7 +150,7 @@ maxtoken=${maxtoken:-"2048"}
 tp=${tp:-"1"}
 aux=${aux:-"0.05"}
 evalsteps=${evalsteps:-"0"}
-save_name="${tag}-${bsz}-lossver${lossver}-samplever${dataver}-fmt${fmt}-${algo}-n${nsamples}-ml${maxlen}-lr${lr}-sys${sys}-${nnode}node" # rbsize 1024->256
+# save_name="${tag}-${bsz}-lossver${lossver}-samplever${dataver}-fmt${fmt}-${algo}-n${nsamples}-ml${maxlen}-lr${lr}-sys${sys}-${nnode}node" # rbsize 1024->256
 
 DATASET=${trainver:-"/path/to/train.parquet"}
 MODEL_CPK_NAME=${save_name}
@@ -173,13 +173,28 @@ post_args=(--ref_num_nodes 0
         --rollout_batch_size ${rbuffer}
 )
 
+
 # :/usr/local/cuda/targets/x86_64-linux/lib
 LD_LIBRARY_PATH_VALUE=${nvjitlink}:$LD_LIBRARY_PATH
 export BNB_CUDA_VERSION=122
 RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
+# RUNTIME_ENV_JSON='{
+#   "env_vars": {
+#     "RAY_DEBUG": "legacy",
+#     "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
+#     "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
+#     "PYTORCH_CUDA_ALLOC_CONF": ""
+#   }
+# }'
+
+unset RANK LOCAL_RANK WORLD_SIZE NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE VC_WORKER_HOSTS MASTER_HOST MASTER_ADDR
+unset GLOO_SOCKET_IFNAME
+unset NCCL_SOCKET_IFNAME
+
 
 # Start Ray head node and capture the output
 ray_output=$(ray start --head --num-gpus 8)
+
 
 unset GLOO_SOCKET_IFNAME
 unset NCLL_SOCKET_IFNAME
@@ -189,7 +204,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 --runtime-env-json="$RUNTIME_ENV_JSON" \
 -- python3 -m openrlhf.cli.train_ppo_ray \
 --vllm_enable_sleep \
---vllm_gpu_memory_utilization 0.85 \
+--vllm_gpu_memory_utilization 0.7 \
 --vllm_sync_backend gloo \
 --pretrain $PRETRAIN_MODEL \
 --save_path $SAVE_PATH \
@@ -235,6 +250,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 --train_vlm \
 --filter ${filter} \
 --eval_data ${testdata} \
+--eval_sample_ratio 0.1 \
 --data_version ${dataver} \
 --loss_version ${lossver} \
 --format ${fmt} \

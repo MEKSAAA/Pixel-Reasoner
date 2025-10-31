@@ -1,7 +1,7 @@
 set -x
 dataname=${dataname:-"${1}"} # hfname VStar-EvalData-PixelReasoner
 newdataname=${newdataname:-"vstar"} # this is the downloaded parquet file name
-hfuser=${hfuser:-"JasperHaozhe"}
+hfuser=${hfuser:-"TIGER-Lab"}
 working_dir=/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl
 
 export HF_ENDPOINT=https://hf-mirror.com

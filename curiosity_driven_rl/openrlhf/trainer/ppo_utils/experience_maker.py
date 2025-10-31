@@ -33,6 +33,7 @@ from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
     ContentItem,
 )
 
+import pdb  # 添加断点调试
 
 logger = init_logger(__name__)
 
@@ -587,6 +588,7 @@ class NaiveExperienceMaker(ABC):
             rewards = rewards.reshape(-1).to(device="cpu").chunk(len(experiences))
             return experiences, rewards
         elif args.advantage_estimator in ["group", "group_sft"]: # this operates in batch level
+            # pdb.set_trace()  # 🔴 断点1: GRPO 优势估计入口
             rewards = torch.cat(tmp) 
             rewards = rewards.reshape(-1, nsample) # .to(device="cuda")  # (bsz,nsample) into groups
             raw_r = rewards.detach().numpy() # bsz,nsamples 
@@ -624,6 +626,7 @@ class NaiveExperienceMaker(ABC):
             # too_many_waits = (reshaped_nwait_round1>2).astype(float)
             # all_waits = torch.from_numpy(all_waits).to(rewards.device)
             baseline = rewards.sum(-1, keepdim=True) / (nsample) # mean of others 
+            # pdb.set_trace()  # 🔴 断点2: 计算group baseline后，检查 rewards 和 baseline
             rewards = rewards - baseline
             
             # for iidx in range(len(rewards)):
@@ -882,7 +885,7 @@ def is_anomaly_detection_task(gt, sol=None, qid=None):
     
     # 方式2: 检查 qid
     if qid and isinstance(qid, str):
-        if 'mvtec' in qid.lower() or 'anomaly' in qid.lower():
+        if 'mvtec' in qid.lower() or 'anomaly' in qid.lower() or 'visa' in qid.lower() or 'goodsad' in qid.lower() or 'mmad' in qid.lower():
             return True
     
     # 方式3: 检查 solution 格式
@@ -1285,6 +1288,53 @@ def parse_last_tool(output_text):
     return json.loads(output_text.split(tool_start)[-1].split(tool_end)[0])
 
 
+def calculate_iou(bbox1, bbox2):
+    """
+    计算两个归一化bbox的IoU (Intersection over Union)
+    
+    Args:
+        bbox1: [x1, y1, x2, y2] 归一化坐标 [0, 1]
+        bbox2: [x1, y1, x2, y2] 归一化坐标 [0, 1]
+    
+    Returns:
+        IoU值 [0, 1]
+    """
+    try:
+        # 确保bbox格式正确
+        x1_1, y1_1, x2_1, y2_1 = float(bbox1[0]), float(bbox1[1]), float(bbox1[2]), float(bbox1[3])
+        x1_2, y1_2, x2_2, y2_2 = float(bbox2[0]), float(bbox2[1]), float(bbox2[2]), float(bbox2[3])
+        
+        # 确保坐标顺序正确（左上角和右下角）
+        x1_1, x2_1 = min(x1_1, x2_1), max(x1_1, x2_1)
+        y1_1, y2_1 = min(y1_1, y2_1), max(y1_1, y2_1)
+        x1_2, x2_2 = min(x1_2, x2_2), max(x1_2, x2_2)
+        y1_2, y2_2 = min(y1_2, y2_2), max(y1_2, y2_2)
+        
+        # 计算交集
+        inter_x1 = max(x1_1, x1_2)
+        inter_y1 = max(y1_1, y1_2)
+        inter_x2 = min(x2_1, x2_2)
+        inter_y2 = min(y2_1, y2_2)
+        
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
+        
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        
+        # 计算并集
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = area1 + area2 - inter_area
+        
+        if union_area <= 0:
+            return 0.0
+        
+        iou = inter_area / union_area
+        return float(iou)
+    except Exception as e:
+        print(f"!!!! [IoU] Error calculating IoU: {e}, bbox1={bbox1}, bbox2={bbox2}")
+        return 0.0
+
 def crop_image_normalized(image, bbox_2d,  padding=0.1):
     """
     Crop the image based on the bounding box coordinates.
@@ -1541,6 +1591,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.rule_reward_func = batch_rule_reward
         self.q2gt = dict() 
         self.q2r = defaultdict(list)
+        self.q2bbox = dict()  # 存储gt_bbox
         for dp in self.gt_path:
             # dp = gt_path
             if dp is None: continue 
@@ -1572,9 +1623,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             # q2gt = dict() 
             # do we need to regularize the question?
             for item in data: 
-                self.q2gt[item[self.qidkey]] = item[self.gt_key]
+                qid = item[self.qidkey]
+                self.q2gt[qid] = item[self.gt_key]
                 if 'responses' in item: 
-                    self.q2r[item[self.qidkey]].extend(item['responses'])
+                    self.q2r[qid].extend(item['responses'])
+                # 存储gt_bbox（如果存在）
+                if 'bbox' in item or 'gt_bbox' in item:
+                    bbox_key = 'bbox' if 'bbox' in item else 'gt_bbox'
+                    self.q2bbox[qid] = item[bbox_key]
+                    print(f'!!!! [bbox] Loaded gt_bbox for qid={qid}: {item[bbox_key]}')
         dataver = getattr(self.strategy.args, "data_version", "red")
         if 'use_response' in dataver:
             assert len(self.q2r)>0, "no q2responses for red mode."
@@ -1635,6 +1692,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             experiences.append(tmp.to_device("cpu"))
         torch.distributed.barrier()
         print(f"===> [verbose] REMaker get_experience(): all samples done logp {len(samples_list)}")
+        # pdb.set_trace()  # 🔴 断点3: 调用 handle_advantages 前，查看所有 experiences
         experiences, rewards = self.handle_advantages(experiences, nsample=nsample)
         
         # calculate return and advantages
@@ -1673,6 +1731,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     experience.action_mask,
                     generate_kwargs["gamma"],
                 )
+                # pdb.set_trace()  # 🔴 断点4: 设置 advantages 和 returns 后
                 experience.advantages = deepcopy(experience.returns)
                 experience.info["return"] = [x.mean() for x in experience.advantages]
                 
@@ -2360,6 +2419,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         final_error_flags = [False for _ in range(len(qids_expanded))]
         do_dump = (getattr(args, "training_mode", "train") in {'eval_only','train'}) and is_eval
         temp_error_flags = [False for _ in range(len(qids_expanded))]
+        # 存储每个样本的bbox和IoU奖励
+        all_predicted_bboxes = [None] * len(qids_expanded)  # 存储模型预测的bbox
+        all_iou_rewards = [0.0] * len(qids_expanded)  # 存储IoU奖励
+        all_has_bbox_call = [False] * len(qids_expanded)  # 标记是否有bbox调用
         while True: 
             req_indexlist = []
             req_vllminputs = []
@@ -2416,6 +2479,61 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     tool_params = parse_last_tool(qatext) 
                     tool_name = tool_params['name']
                     tool_args = tool_params['arguments']
+                    
+                    # 如果是crop_image_normalized工具，保存预测的bbox并计算IoU奖励
+                    if tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
+                        all_has_bbox_call[out_idx] = True  # 标记有bbox调用
+                        pred_bbox = tool_args['bbox_2d']
+                        # 确保bbox是归一化的（如果输入是像素坐标，需要转换）
+                        if len(pred_bbox) == 4:
+                            # 检查bbox是否已经归一化（值在[0,1]范围内）
+                            # 根据工具定义，bbox_2d应该是归一化坐标，但需要确认
+                            is_normalized = all(0 <= x <= 1 for x in pred_bbox)
+                            
+                            if not is_normalized:
+                                # 如果是像素坐标，需要归一化
+                                # 从rawimagelist或imagelist获取图像尺寸
+                                img_size = None
+                                if len(rawimagelist) > 0:
+                                    if isinstance(rawimagelist[0], Image.Image):
+                                        img_size = rawimagelist[0].size
+                                    elif isinstance(rawimagelist[0], list) and len(rawimagelist[0]) > 0:
+                                        if isinstance(rawimagelist[0][0], Image.Image):
+                                            img_size = rawimagelist[0][0].size
+                                
+                                if img_size is not None:
+                                    img_w, img_h = img_size
+                                    pred_bbox = [
+                                        pred_bbox[0]/img_w, 
+                                        pred_bbox[1]/img_h, 
+                                        pred_bbox[2]/img_w, 
+                                        pred_bbox[3]/img_h
+                                    ]
+                                    # 确保归一化后的值在[0,1]范围内
+                                    pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
+                            
+                            all_predicted_bboxes[out_idx] = pred_bbox
+                            
+                            # 计算IoU奖励（实际奖励计算会在后面根据gt_answer进行）
+                            gt_bbox = self.q2bbox.get(qqid, None)
+                            if gt_bbox is not None:
+                                # 确保gt_bbox格式正确，如果是字符串需要解析
+                                if isinstance(gt_bbox, str):
+                                    try:
+                                        gt_bbox = json.loads(gt_bbox)
+                                    except:
+                                        print(f'!!!! [IoU] Warning: Cannot parse gt_bbox as JSON: {gt_bbox}')
+                                        gt_bbox = None
+                                
+                                if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
+                                    # 确保gt_bbox也是归一化的
+                                    if not all(0 <= x <= 1 for x in gt_bbox):
+                                        print(f'!!!! [IoU] Warning: gt_bbox not normalized: {gt_bbox}, treating as normalized anyway')
+                                    
+                                    iou = calculate_iou(pred_bbox, gt_bbox)
+                                    # 先保存IoU值，奖励计算会根据gt_answer在后面进行
+                                    all_iou_rewards[out_idx] = iou  # 先存储原始IoU值
+                                    print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
                     
                     # import pdb; pdb.set_trace() # 3.查看raw_result
                     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call)
@@ -2574,8 +2692,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             this_cur = []
             this_pen = []
             for iidx, (mres, ncall, isvideo) in enumerate(zip(correctness, ntoolcalls,videoflags)):
+                global_idx = idx + iidx  # 全局索引
                 this_r = float(mres)
-                final_is_error_vo = final_error_flags[iidx]
+                final_is_error_vo = final_error_flags[global_idx]
                 if this_r>0.5 and final_is_error_vo: # there is a failure for visual operations but the model does not fix it
                     this_r = 0.0 
                 # incentivize select_frames 
@@ -2596,6 +2715,54 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     # bonus = max(0.0, discount*(curiosity + penalty))
                     bonus = discount*(curiosity + penalty)
                     this_r += bonus
+                
+                # 计算IoU奖励（根据gt_answer和是否有bbox调用）
+                qqid = qids_expanded[global_idx] if global_idx < len(qids_expanded) else None
+                gt_answer = self.q2gt.get(qqid, None) if qqid else None
+                has_bbox_call = all_has_bbox_call[global_idx] if global_idx < len(all_has_bbox_call) else False
+                iou_value = all_iou_rewards[global_idx] if global_idx < len(all_iou_rewards) else 0.0
+                
+                iou_reward = 0.0
+                if gt_answer is not None:
+                    # 将gt_answer转换为布尔值
+                    if isinstance(gt_answer, bool):
+                        gt_is_anomaly = gt_answer
+                    elif isinstance(gt_answer, str):
+                        gt_is_anomaly = gt_answer.lower() in ['true', '1', 'yes']
+                    else:
+                        gt_is_anomaly = bool(gt_answer)
+                    
+                    if not gt_is_anomaly:  # gt_answer = false (正常样本)
+                        if not has_bbox_call:
+                            # 没有bbox调用：奖励为0
+                            iou_reward = 0.0
+                        else:
+                            # 有bbox调用：奖励为iou值
+                            iou_reward = iou_value
+                    else:  # gt_answer = true (异常样本)
+                        if not has_bbox_call:
+                            # 没有bbox调用：奖励为0（不惩罚，也不奖励）
+                            iou_reward = 0.0
+                        else:
+                            # 有bbox调用
+                            if iou_value <= 0.0:  # iou为0或接近0
+                                # iou为0：奖励为0（不惩罚）
+                                iou_reward = 0.0
+                            elif iou_value > 0.5:  # iou大于0.5
+                                # iou > 0.5：奖励为1
+                                iou_reward = 1.0
+                            else:
+                                # 0 < iou <= 0.5：奖励为iou值
+                                iou_reward = iou_value
+                else:
+                    # 如果无法获取gt_answer，使用iou值作为奖励（兼容性）
+                    if iou_value > 0:
+                        iou_reward = iou_value
+                
+                # 添加IoU奖励到总奖励
+                this_r += iou_reward
+                if has_bbox_call or iou_reward != 0.0:
+                    print(f'!!!! [IoU reward] qid={qqid}, gt_answer={gt_answer}, has_bbox_call={has_bbox_call}, iou={iou_value:.4f}, iou_reward={iou_reward:.4f}, total_reward={this_r:.4f}')
                 
                 this_rewards.append(this_r)
                 this_cur.append(curiosity)

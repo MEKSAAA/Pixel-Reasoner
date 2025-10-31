@@ -23,6 +23,8 @@ from collections import defaultdict
 import json
 import time
 
+import pdb  # 添加断点调试
+
 
 
 def read_jsonl(filepath):
@@ -666,6 +668,7 @@ class PPOTrainer(ABC):
             waits = experience.info['round1_nwait']
                 
         print(f"!!!!!!!!! ++++++ already inside training")
+        # pdb.set_trace()  # 🔴 断点5: Actor训练步骤，查看 experience 和 advantages
         # actor loss
         action_log_probs, output = self.actor(
             sequences, # left padded

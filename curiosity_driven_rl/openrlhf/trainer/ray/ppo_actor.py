@@ -27,6 +27,7 @@ from .launcher import BasePPORole
 from .utils import get_physical_gpu_id
 import json
 import shutil
+import pdb  # 添加断点调试
 
 
 class ActorPPOTrainer(PPOTrainer):
@@ -153,6 +154,7 @@ class ActorPPOTrainer(PPOTrainer):
         # 3. actor model training
         if global_steps > self.freezing_actor_steps:
             print('!!!! step', global_steps)
+            # pdb.set_trace()  # 🔴 断点6: PPO训练循环开始
             status = super().ppo_train(global_steps)
             torch.cuda.empty_cache()
 
@@ -455,7 +457,17 @@ class ActorModelRayActor(BasePPORole):
                 return_eval=False,
                 train_split=args.prompt_split,
             )
-            
+            # optional: subsample eval set by ratio
+            ratio = getattr(args, "eval_sample_ratio", None)
+            if ratio is not None and 0 < ratio <= 1:
+                try:
+                    total = len(eval_data)
+                    take = max(1, int(total * ratio))
+                    eval_data = eval_data.shuffle(seed=args.seed).select(range(take))
+                    print(f"!!!!! eval subsampled by ratio {ratio}: {take}/{total}")
+                except Exception as e:
+                    print(f"[Warning] eval_sample_ratio failed, fallback to full eval. error={e}")
+
             self.eval_data = PromptDataset(
                 eval_data, self.tokenizer, strategy, input_template=args.input_template, is_eval=True, processor=self.processor
             )
