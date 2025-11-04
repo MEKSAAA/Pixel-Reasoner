@@ -171,6 +171,31 @@ Zoom in on the image based on the bounding box coordinates. It is useful when th
         return cropped_img 
 
 
+@register_tool("query_image")
+class QueryImage(BaseTool):
+    @property
+    def description(self):
+        return """
+Retrieve a normal reference image of the same class for comparison. This function does not require any arguments.
+""".strip()
+
+    parameters = {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+
+    def call(self, image=None):
+        """
+        Retrieve a normal reference image of the same class for comparison.
+        This is a placeholder implementation - actual implementation should retrieve
+        a reference image from a database or similar source.
+        """
+        # TODO: Implement actual logic to retrieve reference image
+        # For now, return None or the original image as placeholder
+        return image
+
+
    
 
 def extract_qwen_query_and_response(input_text):
@@ -1355,9 +1380,24 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
     return cropped_img 
 
 do_controlled_rectify = True
-def execute_tool(images, rawimages, args, toolname, is_video, function=None):
+def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid=None, q2similar_templates=None):
     # import pdb; pdb.set_trace() # 4.查看images,rawimages,args,toolname,is_video,function
-    if toolname=='select_frames':
+    if toolname=='query_image':
+        # 从 similar_templates 获取第一个图片路径
+        if q2similar_templates is None or qid is None:
+            assert False, "Execution Error: `query_image` requires qid and q2similar_templates to be provided."
+        similar_templates = q2similar_templates.get(qid, None)
+        if similar_templates is None or len(similar_templates) == 0:
+            assert False, f"Execution Error: No similar templates found for qid={qid}."
+        # 获取第一个图片路径
+        ref_image_path = similar_templates[0]
+        # 加载图片
+        try:
+            ref_image = Image.open(ref_image_path).convert('RGB')
+            return ref_image
+        except Exception as e:
+            assert False, f"Execution Error: Failed to load reference image from {ref_image_path}: {str(e)}"
+    elif toolname=='select_frames':
         assert is_video, "Execution Error: You attempted to `select_frames` from **image** not **video**. You should use `crop_image_normalized` instead for inspecting **image**."
         tgt = args['target_frames']
         if len(tgt)>8:
@@ -1592,6 +1632,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.q2gt = dict() 
         self.q2r = defaultdict(list)
         self.q2bbox = dict()  # 存储gt_bbox
+        self.q2similar_templates = dict()  # 存储similar_templates
         for dp in self.gt_path:
             # dp = gt_path
             if dp is None: continue 
@@ -1632,6 +1673,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     bbox_key = 'bbox' if 'bbox' in item else 'gt_bbox'
                     self.q2bbox[qid] = item[bbox_key]
                     print(f'!!!! [bbox] Loaded gt_bbox for qid={qid}: {item[bbox_key]}')
+                # 存储similar_templates（如果存在）
+                if 'similar_templates' in item:
+                    self.q2similar_templates[qid] = item['similar_templates']
         dataver = getattr(self.strategy.args, "data_version", "red")
         if 'use_response' in dataver:
             assert len(self.q2r)>0, "no q2responses for red mode."
@@ -1644,10 +1688,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # self.tools = [CropImageNormalized().function]
         ####### new version
         # self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
-        self.operations = dict(crop_image_normalized=CropImageNormalized())
+        self.operations = dict(crop_image_normalized=CropImageNormalized(), query_image=QueryImage())
         notool = "notool" in getattr(self.strategy.args, "system_prompt", "none")
         
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized']]
+        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'query_image']]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
 
@@ -2536,8 +2580,24 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                     print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
                     
                     # import pdb; pdb.set_trace() # 3.查看raw_result
-                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call)
-                    if tool_name=='select_frames': 
+                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
+                    if tool_name=='query_image':
+                        # 处理 query_image 工具的结果
+                        ref_image = raw_result
+                        mtoken = maxtokens[out_idx]
+                        proc_img = resize_cropped(ref_image, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                        if do_dump:
+                            proc_img.save(targetpath)
+                            print('dumped', targetpath)
+                        
+                        added = [proc_img]
+                        msg_this.append(
+                            dict(role='user', content=[
+                                dict(type='text', text="\nHere is the normal reference image(Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
+                                dict(type='image', image=targetpath)
+                            ])
+                        )
+                    elif tool_name=='select_frames': 
                         
                         selected_frames, info = raw_result 
                         if not isinstance(info, str): # info is the replacement 

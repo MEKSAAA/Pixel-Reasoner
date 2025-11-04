@@ -1,13 +1,13 @@
 set -euo pipefail
 export DEBUG_MODE="true"
-RUN_NAME=md_sft_qwen25vl3b1029        # 保持与八卡相同名称（如需区分可自行加后缀）
+RUN_NAME=md_sft_qwen25vl3b1104        # 保持与八卡相同名称（如需区分可自行加后缀）
 export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-3B-Instruct
-DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train1600sft-md.json
+DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train1600sft-md-merged.json
 
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_DISABLED=true      
 export OMP_NUM_THREADS=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -21,7 +21,7 @@ export NCCL_P2P_DISABLE=1
 # export NCCL_TIMEOUT=180
 # export NCCL_BLOCKING_WAIT=1
 
-python -m torch.distributed.run --nproc_per_node=4 \
+python -m torch.distributed.run --nproc_per_node=8 \
   --nnodes="1" \
   --node_rank="0" \
   --master_addr="127.0.0.1" \
@@ -47,7 +47,7 @@ python -m torch.distributed.run --nproc_per_node=4 \
   --num_train_epochs 7 \
   --run_name ${RUN_NAME} \
   --save_strategy epoch \
-  --save_steps 100 \
+  --save_steps 150 \
   --save_only_model true \
   --freeze_vision_modules true \
   2>&1 | tee "${LOG_PATH}"
