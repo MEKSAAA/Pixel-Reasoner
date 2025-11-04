@@ -2467,6 +2467,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_predicted_bboxes = [None] * len(qids_expanded)  # 存储模型预测的bbox
         all_iou_rewards = [0.0] * len(qids_expanded)  # 存储IoU奖励
         all_has_bbox_call = [False] * len(qids_expanded)  # 标记是否有bbox调用
+        all_has_query_image_call = [False] * len(qids_expanded)  # 标记是否有query_image调用
         while True: 
             req_indexlist = []
             req_vllminputs = []
@@ -2582,6 +2583,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     # import pdb; pdb.set_trace() # 3.查看raw_result
                     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
                     if tool_name=='query_image':
+                        all_has_query_image_call[out_idx] = True  # 标记有query_image调用
                         # 处理 query_image 工具的结果
                         ref_image = raw_result
                         mtoken = maxtokens[out_idx]
@@ -2823,6 +2825,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 this_r += iou_reward
                 if has_bbox_call or iou_reward != 0.0:
                     print(f'!!!! [IoU reward] qid={qqid}, gt_answer={gt_answer}, has_bbox_call={has_bbox_call}, iou={iou_value:.4f}, iou_reward={iou_reward:.4f}, total_reward={this_r:.4f}')
+                
+                # 检查判断错误且未调用 query_image 的情况，扣分 0.5
+                # 使用原始判断结果 mres，而不是已经调整过的 this_r
+                has_query_image_call = all_has_query_image_call[global_idx] if global_idx < len(all_has_query_image_call) else False
+                if mres < 0.5 and not has_query_image_call:  # 原始判断错误且未调用 query_image
+                    query_penalty = 0.5
+                    this_r -= query_penalty
+                    print(f'!!!! [query_image penalty] qid={qqid}, mres={mres:.4f}, judgment_error=True, has_query_image_call=False, penalty={query_penalty:.4f}, total_reward={this_r:.4f}')
                 
                 this_rewards.append(this_r)
                 this_cur.append(curiosity)

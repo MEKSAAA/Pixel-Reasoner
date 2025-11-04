@@ -12,11 +12,11 @@ print(f"mmad.json 包含 {len(mmad_data)} 个条目")
 
 # 读取当前样本文件
 print("\n读取 test6400md.json...")
-test_file = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/test6400md.json"
+test_file = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train366grpo-md-new.json"
 with open(test_file, 'r', encoding='utf-8') as f:
     test_data = json.load(f)
 
-print(f"test6400md.json 包含 {len(test_data)} 个样本")
+print(f"train366grpo-md-new.json.json 包含 {len(test_data)} 个样本")
 
 # 定义基础路径前缀
 base_prefix = "/NEW_EDS/miaojw/projects/MMAD/"
@@ -45,6 +45,11 @@ def convert_to_absolute_path(relative_path, base_prefix):
     
     return full_path
 
+def convert_to_save_path(absolute_path):
+    """将绝对路径转换为保存格式：保持绝对路径，但将DS-MVTec替换为MVTec-AD"""
+    # 将路径中的所有DS-MVTec替换为MVTec-AD，保持绝对路径格式
+    return absolute_path.replace('DS-MVTec/', 'MVTec-AD/')
+
 # 为每个样本添加 similar_templates 字段
 for i, sample in enumerate(test_data):
     image_path = sample.get('image', '')
@@ -67,16 +72,18 @@ for i, sample in enumerate(test_data):
         
         # 检查是否有 similar_templates 字段
         if 'similar_templates' in mmad_entry and mmad_entry['similar_templates']:
-            # 将相对路径转换为完整路径，并检查文件是否存在
+            # 将相对路径转换为完整路径，保存所有路径（不检查文件是否存在）
             similar_templates_full = []
             for template_path in mmad_entry['similar_templates']:
                 # 转换为全局路径
                 full_path = convert_to_absolute_path(template_path, base_prefix)
                 
-                # 检查文件是否存在
-                if os.path.exists(full_path):
-                    similar_templates_full.append(full_path)
-                else:
+                # 转换为保存格式：保持绝对路径，但将DS-MVTec替换为MVTec-AD
+                save_path = convert_to_save_path(full_path)
+                similar_templates_full.append(save_path)
+                
+                # 统计不存在的文件（仅用于统计，不影响保存）
+                if not os.path.exists(full_path):
                     invalid_file_count += 1
                     invalid_files.append(full_path)
             
@@ -97,7 +104,7 @@ for i, sample in enumerate(test_data):
 
 # 保存更新后的文件
 print("\n保存更新后的文件...")
-output_file = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/test6400md.json"
+output_file = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train366grpo-md-new.json"
 with open(output_file, 'w', encoding='utf-8') as f:
     json.dump(test_data, f, ensure_ascii=False, indent=2)
 
@@ -112,4 +119,12 @@ if invalid_files:
     print(f"\n不存在的文件示例（前10个）：")
     for f in invalid_files[:10]:
         print(f"  - {f}")
+    
+    # 将所有不存在的文件保存到文件
+    invalid_files_output = "/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/invalid_files.txt"
+    with open(invalid_files_output, 'w', encoding='utf-8') as f:
+        for file_path in invalid_files:
+            f.write(f"{file_path}\n")
+    print(f"\n所有不存在的文件已保存到: {invalid_files_output}")
+    print(f"共 {len(invalid_files)} 个不存在的文件")
 
