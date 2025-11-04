@@ -5,6 +5,7 @@ PixelReasoner-WarmStart/
 logs/
 eval/
 saves/
+ad-dt/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
