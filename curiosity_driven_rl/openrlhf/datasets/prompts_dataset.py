@@ -113,54 +113,34 @@ class PromptDataset(Dataset):
         #         input_template = templates[system_prompt]
         #         prompt = input_template.format(prompt)
         if has_vlm_processor: 
-            if False:
-                chat = data[input_key]
-                if system_prompt in templates:
-                    chat.insert(0, dict(role='system', content=templates[system_prompt]))
-                else: print(f'!!!! warning: {system_prompt} not in templates')
-                if isinstance(chat[-1]['content'], str): 
-                    text = chat[-1]['content']
-                    content = [
-                        # dict(type='image', image=None),
-                        dict(type='text', text=text)
-                    ]
-                    chat[-1]['content'] = content
-                
-            else:
-                # sysp = None
-                # if system_prompt in templates:
-                #     sysp = templates[system_prompt]
-                # else: print(f'!!!! warning: {system_prompt} not in templates')
-                # now we don't use system prompt 
-                if system_prompt == 'notrigger':
-                    trigger = ""
-                elif system_prompt == 'elaborate':
-                    trigger = f"\n\n{templates['elaborate']}"
-                elif system_prompt == 'elaborate_rethink':
-                    trigger = f"\n\n{templates['elaborate_rethink']}"
-                elif system_prompt == 'rethink':
-                    trigger = f"\n\n{templates['rethink']}"
-                else: 
-                    trigger = f"\n\n{templates[system_prompt]}"
-                q = data['question']
-                img = data.get('image', None)
-                imglist = []
-                if img is None or img=="" : 
-                    pass # keep it empty
-                elif isinstance(img, list): 
-                    if data.get('is_video', False): 
-                        imglist = [dict(type='video', video=img)] # +[dict(type='image', image='/home/ma-user/work/haozhe/workspace/lmm-r1/muzedata/2000-4000/2000/1.jpg')]
-                    else:
-                        imglist = [dict(type='image', image=imm) for imm in img if imm]
-                else: imglist = [dict(type='image', image=img)]
-                # if len(imglist)>10:
-                #     print('!!! [debug]', img)
-                chat = [dict(role='user', 
-                             content=imglist+[dict(type='text', text=q+trigger)] # if img else q
-                        )]
-                
-                if 'qid' in data:
-                    chat.append(dict(qid=data['qid']))
+            # system prompt 作为独立的 system message，user message 只包含 question
+            q = data['question']
+            img = data.get('image', None)
+            imglist = []
+            if img is None or img=="" : 
+                pass # keep it empty
+            elif isinstance(img, list): 
+                if data.get('is_video', False): 
+                    imglist = [dict(type='video', video=img)]
+                else:
+                    imglist = [dict(type='image', image=imm) for imm in img if imm]
+            else: imglist = [dict(type='image', image=img)]
+            
+            # 构建 user message（只包含 question，不包含 template）
+            chat = [dict(role='user', 
+                         content=imglist+[dict(type='text', text=q)]
+                    )]
+            
+            # 添加 system message（来自 templates）
+            if system_prompt != 'notrigger' and system_prompt in templates:
+                sys_content = templates[system_prompt]
+                if sys_content:  # 如果 system prompt 不为空
+                    chat.insert(0, dict(role='system', content=sys_content))
+            elif system_prompt not in templates and system_prompt != 'notrigger':
+                print(f'!!!! warning: {system_prompt} not in templates')
+            
+            if 'qid' in data:
+                chat.append(dict(qid=data['qid']))
             prompt = json.dumps(chat)
         elif input_key=='question':
             chat = [{"role": "system", "content": templates["default"]},

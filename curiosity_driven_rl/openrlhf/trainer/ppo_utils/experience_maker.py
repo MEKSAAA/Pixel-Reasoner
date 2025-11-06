@@ -845,6 +845,42 @@ def normalize_answer(answer):
     # if "a.m." in answer: answer = answer.replace("a.m.","")
     return answer
 
+def extract_anomaly_type(sol):
+    """
+    从模型输出中提取异常类型
+    模型输出格式: <answer>{"anomaly_present": true/false, "anomaly_type": "xxx", ...}</answer>
+    返回: 异常类型字符串，如果未找到则返回 None
+    """
+    try:
+        # 查找 <answer> 标签
+        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        if not found:
+            return None
+        
+        answer_str = found.group(1).strip()
+        
+        # 尝试解析JSON
+        try:
+            answer_json = json.loads(answer_str)
+        except json.JSONDecodeError as e:
+            print(f"!!!! [debug] JSON parsing error in extract_anomaly_type: {e}, answer_str: {answer_str}")
+            return None
+        
+        # 检查是否包含 anomaly_type 字段
+        if "anomaly_type" not in answer_json:
+            return None
+        
+        # 提取异常类型
+        anomaly_type = answer_json["anomaly_type"]
+        if isinstance(anomaly_type, str):
+            return anomaly_type.strip()
+        else:
+            return str(anomaly_type).strip()
+        
+    except Exception as e:
+        print(f"!!!! [debug] Exception in extract_anomaly_type: {e}")
+        return None
+
 def verify_anomaly_detection(sol, gt):
     """
     验证异常检测任务的答案
@@ -1474,20 +1510,40 @@ def get_required_messages(messages):
     conversations_list = [json.loads(mm) if isinstance(mm,str) else mm for mm in messages]
     final = []
     for conversations in conversations_list:
-        message_list = [Message(role="system", content=[ContentItem(text="You are a helpful assistant.")])]
+        message_list = []
         
         for entry in conversations:
             role = entry['role']
             
-            content = entry['content']
-            contlist = []
-            for cont in content:
-                if cont['type'] == 'text':
-                    contlist.append(ContentItem(text="{Question}".format(Question=cont['text'])))
-                elif cont['type'] in {'image','video'}:
-                    key = cont['type']
-                    contlist.append(ContentItem(image=cont[key] ) if key=='image' else ContentItem(video=cont[key] ))
-            message_list.append(Message(role=role, content=contlist))
+            # 如果已经有 system message，保留它；否则不添加默认的 system message
+            # system prompt 应该已经在 PromptDataset 中作为 trigger 添加到 question 文本中了
+            if role == 'system':
+                content = entry['content']
+                contlist = []
+                if isinstance(content, str):
+                    contlist.append(ContentItem(text=content))
+                elif isinstance(content, list):
+                    for cont in content:
+                        if isinstance(cont, str):
+                            contlist.append(ContentItem(text=cont))
+                        elif cont.get('type') == 'text':
+                            contlist.append(ContentItem(text=cont['text']))
+                        elif cont.get('type') in {'image','video'}:
+                            key = cont.get('type')
+                            contlist.append(ContentItem(image=cont[key] ) if key=='image' else ContentItem(video=cont[key] ))
+                message_list.append(Message(role=role, content=contlist))
+            else:
+                # 处理 user/assistant message（user message 只包含 question，不包含 template）
+                content = entry['content']
+                contlist = []
+                for cont in content:
+                    if cont['type'] == 'text':
+                        # 直接使用文本内容，不需要添加前缀
+                        contlist.append(ContentItem(text=cont['text']))
+                    elif cont['type'] in {'image','video'}:
+                        key = cont['type']
+                        contlist.append(ContentItem(image=cont[key] ) if key=='image' else ContentItem(video=cont[key] ))
+                message_list.append(Message(role=role, content=contlist))
         final.append(message_list)
     return final
 
@@ -1633,6 +1689,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.q2r = defaultdict(list)
         self.q2bbox = dict()  # 存储gt_bbox
         self.q2similar_templates = dict()  # 存储similar_templates
+        self.q2anomaly_type = dict()  # 存储anomaly_type
         for dp in self.gt_path:
             # dp = gt_path
             if dp is None: continue 
@@ -1676,6 +1733,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # 存储similar_templates（如果存在）
                 if 'similar_templates' in item:
                     self.q2similar_templates[qid] = item['similar_templates']
+                # 存储anomaly_type（如果存在）
+                if 'anomaly_type' in item:
+                    self.q2anomaly_type[qid] = item['anomaly_type']
+                    print(f'!!!! [anomaly_type] Loaded anomaly_type for qid={qid}: {item["anomaly_type"]}')
         dataver = getattr(self.strategy.args, "data_version", "red")
         if 'use_response' in dataver:
             assert len(self.q2r)>0, "no q2responses for red mode."
@@ -2784,15 +2845,18 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 has_bbox_call = all_has_bbox_call[global_idx] if global_idx < len(all_has_bbox_call) else False
                 iou_value = all_iou_rewards[global_idx] if global_idx < len(all_iou_rewards) else 0.0
                 
-                iou_reward = 0.0
+                # 将gt_answer转换为布尔值（供后续使用）
+                gt_is_anomaly = None
                 if gt_answer is not None:
-                    # 将gt_answer转换为布尔值
                     if isinstance(gt_answer, bool):
                         gt_is_anomaly = gt_answer
                     elif isinstance(gt_answer, str):
                         gt_is_anomaly = gt_answer.lower() in ['true', '1', 'yes']
                     else:
                         gt_is_anomaly = bool(gt_answer)
+                
+                iou_reward = 0.0
+                if gt_is_anomaly is not None:
                     
                     if not gt_is_anomaly:  # gt_answer = false (正常样本)
                         if not has_bbox_call:
@@ -2825,6 +2889,26 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 this_r += iou_reward
                 if has_bbox_call or iou_reward != 0.0:
                     print(f'!!!! [IoU reward] qid={qqid}, gt_answer={gt_answer}, has_bbox_call={has_bbox_call}, iou={iou_value:.4f}, iou_reward={iou_reward:.4f}, total_reward={this_r:.4f}')
+                
+                # 计算异常类型匹配奖励（当gt_answer为true时，如果模型判断的异常类型与测试集中的anomaly_type一致，加0.3分）
+                anomaly_type_reward = 0.0
+                # 只有当gt_answer为true（异常样本）时才检查异常类型匹配
+                if gt_is_anomaly:
+                    gt_anomaly_type = self.q2anomaly_type.get(qqid, None) if qqid else None
+                    if gt_anomaly_type is not None:
+                        # 从模型输出中提取异常类型
+                        if global_idx < len(all_qa_texts):
+                            solution_text = all_qa_texts[global_idx]
+                            pred_anomaly_type = extract_anomaly_type(solution_text)
+                            
+                            if pred_anomaly_type is not None:
+                                # 比较预测的异常类型和真实异常类型（不区分大小写）
+                                if pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip():
+                                    anomaly_type_reward = 0.3
+                                    this_r += anomaly_type_reward
+                                    print(f'!!!! [anomaly_type reward] qid={qqid}, gt_answer={gt_answer}, pred_anomaly_type={pred_anomaly_type}, gt_anomaly_type={gt_anomaly_type}, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
+                                else:
+                                    print(f'!!!! [anomaly_type mismatch] qid={qqid}, pred_anomaly_type={pred_anomaly_type}, gt_anomaly_type={gt_anomaly_type}')
                 
                 # 检查判断错误且未调用 query_image 的情况，扣分 0.5
                 # 使用原始判断结果 mres，而不是已经调整过的 this_r
