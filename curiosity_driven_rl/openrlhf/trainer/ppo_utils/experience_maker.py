@@ -26,6 +26,12 @@ from math_verify import parse, verify
 import pickle as pkl
 import re 
 from PIL import Image
+try:
+    import open_clip  # type: ignore
+    _HAS_OPEN_CLIP = True
+except ImportError:
+    open_clip = None  # type: ignore
+    _HAS_OPEN_CLIP = False
 from qwen_agent.tools.base import BaseTool, register_tool
 from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
     NousFnCallPrompt,
@@ -36,6 +42,15 @@ from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
 import pdb  # 添加断点调试
 
 logger = init_logger(__name__)
+
+CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "ViT-B-32")
+CLIP_PRETRAINED = os.getenv("CLIP_PRETRAINED", "laion2b_s34b_b79k")
+CLIP_QUERY_IMAGE_PENALTY = float(os.getenv("CLIP_QUERY_IMAGE_PENALTY", "0.3"))
+
+_clip_model = None
+_clip_preprocess = None
+_clip_tokenizer = None
+_clip_device = None
 
 def to_rgb(pil_image: Image.Image) -> Image.Image:
       if pil_image.mode == 'RGBA':
@@ -418,6 +433,9 @@ class Samples:
     curiosity_bonus: list[float]
     penalty_bonus: list[float]
     # round0_saturation: list[float]
+    clip_similarity: list[Optional[float]] = field(default_factory=list)
+    clip_normal_similarity: list[Optional[float]] = field(default_factory=list)
+    clip_penalty: list[float] = field(default_factory=list)
 
 def get_raw(modelfamily, text):
     if modelfamily=='dpsk':
@@ -954,6 +972,104 @@ def is_anomaly_detection_task(gt, sol=None, qid=None):
         return True
     
     return False 
+
+
+def extract_anomaly_present(sol) -> Optional[bool]:
+    try:
+        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        if not found:
+            return None
+        answer_str = found.group(1).strip()
+        try:
+            answer_json = json.loads(answer_str)
+        except json.JSONDecodeError as e:
+            print(f"!!!! [debug] JSON parsing error in extract_anomaly_present: {e}, answer_str: {answer_str}")
+            return None
+        pred = answer_json.get("anomaly_present", None)
+        if isinstance(pred, bool):
+            return pred
+        return None
+    except Exception as e:
+        print(f"!!!! [debug] Exception in extract_anomaly_present: {e}")
+        return None
+
+
+def extract_visual_descriptions(sol):
+    """從輸出中提取 visual_descriptions 列表。"""
+    try:
+        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        if not found:
+            return []
+        answer_str = found.group(1).strip()
+        try:
+            answer_json = json.loads(answer_str)
+        except json.JSONDecodeError as e:
+            print(f"!!!! [debug] JSON parsing error in extract_visual_descriptions: {e}, answer_str: {answer_str}")
+            return []
+        descriptions = answer_json.get("visual_descriptions", [])
+        if isinstance(descriptions, str):
+            return [descriptions]
+        if isinstance(descriptions, list):
+            results = []
+            for item in descriptions:
+                if isinstance(item, str):
+                    results.append(item)
+                else:
+                    try:
+                        results.append(str(item))
+                    except Exception:
+                        continue
+            return results
+        return []
+    except Exception as e:
+        print(f"!!!! [debug] Exception in extract_visual_descriptions: {e}")
+        return []
+
+
+def _init_clip_model():
+    global _clip_model, _clip_preprocess, _clip_tokenizer, _clip_device
+    if not _HAS_OPEN_CLIP:
+        return None, None, None, None
+    if any(x is None for x in (_clip_model, _clip_preprocess, _clip_tokenizer, _clip_device)):
+        try:
+            model, _, preprocess = open_clip.create_model_and_transforms(CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED)
+            tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
+            device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+            model = model.to(device)
+            model.eval()
+            for param in model.parameters():
+                param.requires_grad_(False)
+            _clip_model = model
+            _clip_preprocess = preprocess
+            _clip_tokenizer = tokenizer
+            _clip_device = device
+        except Exception as e:
+            print(f"!!!! [clip] Failed to initialise CLIP model: {e}")
+            _clip_model = _clip_preprocess = _clip_tokenizer = _clip_device = None
+            return None, None, None, None
+    return _clip_model, _clip_preprocess, _clip_tokenizer, _clip_device
+
+
+def compute_clip_similarity(image: Image.Image, text: str) -> Optional[float]:
+    if not _HAS_OPEN_CLIP or not text:
+        return None
+    model, preprocess, tokenizer, device = _init_clip_model()
+    if model is None or preprocess is None or tokenizer is None or device is None:
+        return None
+    try:
+        image_tensor = preprocess(image.convert("RGB")).unsqueeze(0).to(device)
+        text_tokens = tokenizer([text]).to(device)
+        with torch.no_grad():
+            image_features = model.encode_image(image_tensor)
+            text_features = model.encode_text(text_tokens)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            similarity = (image_features @ text_features.T).item()
+        return float(similarity)
+    except Exception as e:
+        print(f"!!!! [clip] Failed to compute similarity: {e}")
+        return None
+
 
 def handle_boxed(sol, gt, eostoken, format_type, requires_box=False, qid=None):
     # print(sol)
@@ -1690,6 +1806,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.q2bbox = dict()  # 存储gt_bbox
         self.q2similar_templates = dict()  # 存储similar_templates
         self.q2anomaly_type = dict()  # 存储anomaly_type
+        self.q2class = dict()  # 存储类别名称
         for dp in self.gt_path:
             # dp = gt_path
             if dp is None: continue 
@@ -1737,6 +1854,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 if 'anomaly_type' in item:
                     self.q2anomaly_type[qid] = item['anomaly_type']
                     print(f'!!!! [anomaly_type] Loaded anomaly_type for qid={qid}: {item["anomaly_type"]}')
+                class_name = item.get('class_name') or item.get('class') or item.get('category')
+                if class_name is not None:
+                    self.q2class[qid] = class_name
         dataver = getattr(self.strategy.args, "data_version", "red")
         if 'use_response' in dataver:
             assert len(self.q2r)>0, "no q2responses for red mode."
@@ -2054,6 +2174,16 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             print(f"===> [verbose] shaped_reward={rewards}")
             rewards = torch.FloatTensor(rewards) # a list of tensor, tensor shape = queries shape
         # print('!!!! debug rewards', rewards.shape)
+        clip_similarity_logged = getattr(batched_sample, "clip_similarity", [])
+        clip_normal_similarity_logged = getattr(batched_sample, "clip_normal_similarity", [])
+        clip_penalty_logged = getattr(batched_sample, "clip_penalty", [])
+        if len(clip_similarity_logged) == 0 and len(potential_qids) > 0:
+            clip_similarity_logged = [None] * len(potential_qids)
+        if len(clip_normal_similarity_logged) == 0 and len(potential_qids) > 0:
+            clip_normal_similarity_logged = [None] * len(potential_qids)
+        if len(clip_penalty_logged) == 0 and len(potential_qids) > 0:
+            clip_penalty_logged = [0.0] * len(potential_qids)
+
         info = {
             "reward": rewards, # tensor of shape (queries)
             "response_length": batched_sample.response_length,
@@ -2078,7 +2208,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             "round0_Medium": batched_sample.round0_Medium,
             "uniformity": batched_sample.uniformity,
             "curiosity": batched_sample.curiosity_bonus,
-            "penalty": batched_sample.penalty_bonus
+            "penalty": batched_sample.penalty_bonus,
+            "clip_similarity": [None if x is None else float(x) for x in clip_similarity_logged],
+            "clip_normal_similarity": [None if x is None else float(x) for x in clip_normal_similarity_logged],
+            "clip_penalty": [float(x) for x in clip_penalty_logged],
         }
             
         if base_action_log_probs is not None:   
@@ -2390,6 +2523,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_conversations = dict()
         all_images = dict()
         all_raw_images = dict()
+        last_crop_images = dict()
         nsample = 1 if is_eval else args.n_samples_per_prompt
         
         potential_qids = []
@@ -2695,6 +2829,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             print('dumped', targetpath)
                         
                         added = [proc_img]
+                        last_crop_images[uuid] = proc_img.copy()
                         msg_this.append(
                             dict(role='user', content=[
                                 dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
@@ -2787,6 +2922,45 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             
         # peek the responses 
         torch.distributed.barrier()
+        
+        clip_similarity_values = [None] * len(all_uids)
+        clip_normal_similarity_values = [None] * len(all_uids)
+        clip_penalty_flags = [0.0] * len(all_uids)
+        if _HAS_OPEN_CLIP:
+            for idx, uuid in enumerate(all_uids):
+                crop_img = last_crop_images.get(uuid)
+                if crop_img is None:
+                    continue
+                sol_text = solutions_round0[idx]
+                anomaly_pred = extract_anomaly_present(sol_text)
+                if anomaly_pred is not True:
+                    continue
+                visual_descs = extract_visual_descriptions(sol_text)
+                if not visual_descs:
+                    continue
+                qid = qids_expanded[idx] if idx < len(qids_expanded) else None
+                class_name = self.q2class.get(qid) if qid else None
+                if class_name:
+                    class_name_fmt = class_name.replace('_', ' ')
+                else:
+                    class_name_fmt = None
+                baseline_sim = None
+                if class_name_fmt:
+                    baseline_text = f"good {class_name_fmt}"
+                    baseline_sim = compute_clip_similarity(crop_img, baseline_text)
+                    if baseline_sim is not None:
+                        clip_normal_similarity_values[idx] = baseline_sim
+                sims = []
+                for desc in visual_descs:
+                    if class_name_fmt:
+                        desc_text = f"{class_name_fmt} with {desc}"
+                    else:
+                        desc_text = desc
+                    sim = compute_clip_similarity(crop_img, desc_text)
+                    if sim is not None:
+                        sims.append(sim)
+                if sims:
+                    clip_similarity_values[idx] = float(np.mean(sims))
         
         rets_round1 = self.convenient_get_batch_rewards_from_queries(all_qa_texts, qids_expanded)
         difficulty_labels = []
@@ -2913,6 +3087,17 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # 检查判断错误且未调用 query_image 的情况，扣分 0.5
                 # 使用原始判断结果 mres，而不是已经调整过的 this_r
                 has_query_image_call = all_has_query_image_call[global_idx] if global_idx < len(all_has_query_image_call) else False
+                clip_sim = clip_similarity_values[global_idx] if global_idx < len(clip_similarity_values) else None
+                clip_normal_sim = clip_normal_similarity_values[global_idx] if global_idx < len(clip_normal_similarity_values) else None
+                if (
+                    clip_sim is not None
+                    and clip_normal_sim is not None
+                    and clip_sim > clip_normal_sim
+                    and has_query_image_call
+                ):
+                    this_r -= CLIP_QUERY_IMAGE_PENALTY
+                    clip_penalty_flags[global_idx] = CLIP_QUERY_IMAGE_PENALTY
+                    print(f'!!!! [clip penalty] qid={qqid}, abnormal_sim={clip_sim:.4f}, normal_sim={clip_normal_sim:.4f}, penalty={CLIP_QUERY_IMAGE_PENALTY}, total_reward={this_r:.4f}')
                 if mres < 0.5 and not has_query_image_call:  # 原始判断错误且未调用 query_image
                     query_penalty = 0.5
                     this_r -= query_penalty
@@ -3200,6 +3385,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     uniformity=uniformity[i : i + self.strategy.args.micro_rollout_batch_size],
                     curiosity_bonus=curiosity_bonus[i : i + self.strategy.args.micro_rollout_batch_size],
                     penalty_bonus=penalty_bonus[i : i + self.strategy.args.micro_rollout_batch_size],
+                    clip_similarity=clip_similarity_values[i : i + self.strategy.args.micro_rollout_batch_size],
+                    clip_normal_similarity=clip_normal_similarity_values[i : i + self.strategy.args.micro_rollout_batch_size],
+                    clip_penalty=clip_penalty_flags[i : i + self.strategy.args.micro_rollout_batch_size],
                 )
             )
 
