@@ -1,10 +1,10 @@
 set -euo pipefail
 export DEBUG_MODE="true"
-RUN_NAME=md_sft_qwen25vl3b1104        # 保持与八卡相同名称（如需区分可自行加后缀）
+RUN_NAME=md_sft_qwen25vl3b1108       # 保持与八卡相同名称（如需区分可自行加后缀）
 export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-3B-Instruct
-DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train1600sft-md-merged.json
+DATA_JSON=/NEW_EDS/miaojw/projects/Pixel-Reasoner/ad-dt/train1600sft-112query.json
 
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
