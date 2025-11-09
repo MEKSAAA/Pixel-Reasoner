@@ -782,7 +782,15 @@ class PPOTrainer(ABC):
                 status.update(tmp)
             else:
                 if isinstance(v[0], str): continue 
-                status[k] = v.mean().item() if isinstance(v, torch.Tensor) else np.mean(v)
+                if isinstance(v, torch.Tensor):
+                    status[k] = v.mean().item()
+                else:
+                    # 过滤掉 None 值再计算 mean
+                    valid_values = [x for x in v if x is not None]
+                    if len(valid_values) > 0:
+                        status[k] = np.mean(valid_values)
+                    else:
+                        status[k] = 0.0  # 如果全是 None，默认为 0
         
         num_exceed = np.mean([x>=self.strategy.args.generate_max_len-1 for x in experience.info['response_length']])
         status['generation_exceed_rate'] = num_exceed
