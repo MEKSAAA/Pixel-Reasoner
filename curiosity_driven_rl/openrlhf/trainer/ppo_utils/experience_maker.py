@@ -200,15 +200,50 @@ Retrieve a normal reference image of the same class for comparison. This functio
         "required": []
     }
 
-    def call(self, image=None):
+    def call(
+        self,
+        image=None,
+        *,
+        qid: Optional[str] = None,
+        similar_templates: Optional[Dict[str, List[str]]] = None,
+        return_path: bool = False,
+    ):
+        """Retrieve a normal reference image of the same class for comparison.
+
+        Args:
+            image: Backward-compatible placeholder. When both `qid` and
+                `similar_templates` are not provided, this value is returned to
+                maintain the previous behaviour.
+            qid: Identifier of the current question/query, used to look up
+                reference images.
+            similar_templates: Mapping from qids to candidate reference image
+                paths.
+            return_path: When True, return the resolved image path instead of
+                loading the image from disk.
+
+        Returns:
+            Either a string path (if ``return_path`` is True) or a
+            ``PIL.Image.Image`` loaded from the resolved path. Falls back to the
+            provided ``image`` argument when lookup information is missing so
+            that older call sites keep working.
         """
-        Retrieve a normal reference image of the same class for comparison.
-        This is a placeholder implementation - actual implementation should retrieve
-        a reference image from a database or similar source.
-        """
-        # TODO: Implement actual logic to retrieve reference image
-        # For now, return None or the original image as placeholder
-        return image
+        if qid is None or similar_templates is None:
+            return image
+
+        templates = similar_templates.get(qid)
+        if not templates:
+            raise ValueError(f"No similar templates found for qid={qid}.")
+
+        ref_path = templates[0]
+        if return_path:
+            return ref_path
+
+        try:
+            return Image.open(ref_path).convert("RGB")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load reference image for qid={qid} from {ref_path}"
+            ) from exc
 
 
    
@@ -264,7 +299,7 @@ def extract_dpsk_query_and_response(input_text):
     else: assistant_response = parts[1]
     
     # Extract the user query by splitting the user part
-    user_query = user_part.split("<｜User｜>")[1]
+    user_query = user_part.split("Ã")[1]
     
     # Return the user query and the assistant's response
     return user_query, assistant_response
@@ -439,7 +474,7 @@ class Samples:
 
 def get_raw(modelfamily, text):
     if modelfamily=='dpsk':
-        user = text.split("<｜Assistant｜>")[0].split("<｜User｜>")[1]
+        user = text.split("<｜Assistant｜>")[0].split("Ã")[1]
         return user
     
 class NaiveExperienceMaker(ABC):
@@ -1535,20 +1570,26 @@ do_controlled_rectify = True
 def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid=None, q2similar_templates=None):
     # import pdb; pdb.set_trace() # 4.查看images,rawimages,args,toolname,is_video,function
     if toolname=='query_image':
-        # 从 similar_templates 获取第一个图片路径
         if q2similar_templates is None or qid is None:
             assert False, "Execution Error: `query_image` requires qid and q2similar_templates to be provided."
-        similar_templates = q2similar_templates.get(qid, None)
-        if similar_templates is None or len(similar_templates) == 0:
-            assert False, f"Execution Error: No similar templates found for qid={qid}."
-        # 获取第一个图片路径
-        ref_image_path = similar_templates[0]
-        # 加载图片
+        if function is None:
+            assert False, "Execution Error: `query_image` handler is not available."
+
+        try:
+            ref_image_path = function(
+                qid=qid,
+                similar_templates=q2similar_templates,
+                return_path=True,
+            )
+        except Exception as exc:
+            assert False, f"Execution Error: Failed to resolve reference image for qid={qid}: {exc}"
+
         try:
             ref_image = Image.open(ref_image_path).convert('RGB')
-            return ref_image
-        except Exception as e:
-            assert False, f"Execution Error: Failed to load reference image from {ref_image_path}: {str(e)}"
+        except Exception as exc:
+            assert False, f"Execution Error: Failed to load reference image from {ref_image_path}: {exc}"
+
+        return ref_image
     elif toolname=='select_frames':
         assert is_video, "Execution Error: You attempted to `select_frames` from **image** not **video**. You should use `crop_image_normalized` instead for inspecting **image**."
         tgt = args['target_frames']
@@ -1850,6 +1891,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # 存储similar_templates（如果存在）
                 if 'similar_templates' in item:
                     self.q2similar_templates[qid] = item['similar_templates']
+                    print(f'!!!! [similar_templates] Loaded similar_templates for qid={qid}: {len(item["similar_templates"])} templates')
                 # 存储anomaly_type（如果存在）
                 if 'anomaly_type' in item:
                     self.q2anomaly_type[qid] = item['anomaly_type']
@@ -2529,8 +2571,16 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         potential_qids = []
         qids_expanded = []
         maxtokens = []
-        for m in all_prompts: 
-            info = json.loads(m)
+        for m in all_prompts:
+            if not m or not m.strip():
+                print(f"!!!! [warning] Empty prompt found, skipping")
+                continue
+            try:
+                info = json.loads(m)
+            except json.JSONDecodeError as e:
+                print(f"!!!! [error] Failed to parse prompt as JSON: {e}")
+                print(f"!!!! [error] Prompt content (first 200 chars): {m[:200]}")
+                raise
             if 'qid' in info[-1]: 
                 newm = json.dumps(info[:-1]) # we need to drop the qid entry 
                 qid = info[-1]['qid']
