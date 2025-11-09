@@ -916,17 +916,23 @@ def extract_anomaly_type(sol):
         try:
             answer_json = json.loads(answer_str)
         except json.JSONDecodeError as e:
-            print(f"!!!! [debug] JSON parsing error in extract_anomaly_type: {e}, answer_str: {answer_str}")
+            # 只在非占位符错误时打印（减少日志噪音）
+            if "true/false" not in answer_str and "<label" not in answer_str:
+                print(f"!!!! [debug] JSON parsing error in extract_anomaly_type: {e}, answer_str: {answer_str[:100]}")
             return None
         
-        # 检查是否包含 anomaly_type 字段
-        if "anomaly_type" not in answer_json:
+        # 检查是否包含 anomaly_type 字段（也支持 top_anomaly）
+        anomaly_type = answer_json.get("anomaly_type") or answer_json.get("top_anomaly")
+        if not anomaly_type:
             return None
         
         # 提取异常类型
-        anomaly_type = answer_json["anomaly_type"]
         if isinstance(anomaly_type, str):
-            return anomaly_type.strip()
+            anomaly_type = anomaly_type.strip()
+            # 过滤掉占位符
+            if anomaly_type in ["<label or 'none'>", "<label>", "none", ""]:
+                return None
+            return anomaly_type
         else:
             return str(anomaly_type).strip()
         
@@ -1006,7 +1012,56 @@ def is_anomaly_detection_task(gt, sol=None, qid=None):
     if sol and 'anomaly_present' in sol:
         return True
     
-    return False 
+    return False
+
+
+def is_invalid_json_output(sol):
+    """
+    检测模型输出是否包含无效的JSON格式（占位符）
+    返回: True 如果是无效输出（应该扣分），False 如果正常
+    """
+    try:
+        # 查找 <answer> 标签
+        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        if not found:
+            # 没有 answer 标签，可能还没学会格式
+            return True
+        
+        answer_str = found.group(1).strip()
+        
+        # 检查是否包含占位符（这些是模板格式，不是真实答案）
+        placeholder_patterns = [
+            "true/false",           # {"anomaly_present": true/false}
+            "<label",               # <label or 'none'>
+            '"..."',                # "visual_descriptions": ["..."]
+            "...",                  # 省略号
+        ]
+        
+        for pattern in placeholder_patterns:
+            if pattern in answer_str:
+                return True
+        
+        # 尝试解析JSON
+        try:
+            answer_json = json.loads(answer_str)
+        except json.JSONDecodeError:
+            # JSON 解析失败
+            return True
+        
+        # 检查关键字段
+        if "anomaly_present" not in answer_json:
+            return True
+        
+        # 检查 anomaly_present 是否是有效的布尔值
+        if not isinstance(answer_json["anomaly_present"], bool):
+            return True
+        
+        # 一切正常
+        return False
+        
+    except Exception as e:
+        # 异常也认为是无效输出
+        return True 
 
 
 def extract_anomaly_present(sol) -> Optional[bool]:
@@ -2976,7 +3031,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         clip_similarity_values = [None] * len(all_uids)
         clip_normal_similarity_values = [None] * len(all_uids)
         clip_penalty_flags = [0.0] * len(all_uids)
-        if _HAS_OPEN_CLIP:
+        if False:  # 禁用 CLIP 相似度计算（原：if _HAS_OPEN_CLIP:）
             for idx, uuid in enumerate(all_uids):
                 crop_img = last_crop_images.get(uuid)
                 if crop_img is None:
@@ -3063,6 +3118,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     bonus = discount*(curiosity + penalty)
                     this_r += bonus
                 
+                # 检查是否是无效的JSON输出（占位符格式），扣0.5分
+                if global_idx < len(all_qa_texts):
+                    solution_text = all_qa_texts[global_idx]
+                    if is_invalid_json_output(solution_text):
+                        invalid_json_penalty = 0.5
+                        this_r -= invalid_json_penalty
+                        print(f'!!!! [invalid JSON penalty] qid={qids_expanded[global_idx] if global_idx < len(qids_expanded) else "unknown"}, penalty={invalid_json_penalty:.4f}, total_reward={this_r:.4f}')
+                
                 # 计算IoU奖励（根据gt_answer和是否有bbox调用）
                 qqid = qids_expanded[global_idx] if global_idx < len(qids_expanded) else None
                 gt_answer = self.q2gt.get(qqid, None) if qqid else None
@@ -3137,17 +3200,19 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 # 检查判断错误且未调用 query_image 的情况，扣分 0.5
                 # 使用原始判断结果 mres，而不是已经调整过的 this_r
                 has_query_image_call = all_has_query_image_call[global_idx] if global_idx < len(all_has_query_image_call) else False
-                clip_sim = clip_similarity_values[global_idx] if global_idx < len(clip_similarity_values) else None
-                clip_normal_sim = clip_normal_similarity_values[global_idx] if global_idx < len(clip_normal_similarity_values) else None
-                if (
-                    clip_sim is not None
-                    and clip_normal_sim is not None
-                    and clip_sim > clip_normal_sim
-                    and has_query_image_call
-                ):
-                    this_r -= CLIP_QUERY_IMAGE_PENALTY
-                    clip_penalty_flags[global_idx] = CLIP_QUERY_IMAGE_PENALTY
-                    print(f'!!!! [clip penalty] qid={qqid}, abnormal_sim={clip_sim:.4f}, normal_sim={clip_normal_sim:.4f}, penalty={CLIP_QUERY_IMAGE_PENALTY}, total_reward={this_r:.4f}')
+                # 禁用 CLIP 惩罚（如需启用，取消下面的注释）
+                if False:  # 原：if clip_sim is not None and clip_normal_sim is not None...
+                    clip_sim = clip_similarity_values[global_idx] if global_idx < len(clip_similarity_values) else None
+                    clip_normal_sim = clip_normal_similarity_values[global_idx] if global_idx < len(clip_normal_similarity_values) else None
+                    if (
+                        clip_sim is not None
+                        and clip_normal_sim is not None
+                        and clip_sim > clip_normal_sim
+                        and has_query_image_call
+                    ):
+                        this_r -= CLIP_QUERY_IMAGE_PENALTY
+                        clip_penalty_flags[global_idx] = CLIP_QUERY_IMAGE_PENALTY
+                        print(f'!!!! [clip penalty] qid={qqid}, abnormal_sim={clip_sim:.4f}, normal_sim={clip_normal_sim:.4f}, penalty={CLIP_QUERY_IMAGE_PENALTY}, total_reward={this_r:.4f}')
                 if mres < 0.5 and not has_query_image_call:  # 原始判断错误且未调用 query_image
                     query_penalty = 0.5
                     this_r -= query_penalty
