@@ -328,15 +328,43 @@ class Qwen2VLSFTToolTrainer(Trainer):
 
             # Find all im_start positions
             im_start_positions = (sequence == im_start).nonzero().flatten()
-            for pos in im_start_positions:
-                # Check if the token after im_start is "assistant"
+            if True:
+                pos = im_start_positions[-2]
                 if pos + 1 < len(sequence) and sequence[pos + 1] == assistant:
-                    # Find the next im_end
                     next_end = sequence[pos:].eq(im_end).nonzero()
                     if len(next_end) > 0:
                         end_pos = pos + next_end[0].item()
                         # Mark the entire response (including the im_start and im_end tokens)
                         mask[i, pos:end_pos + 1] = True
+                pos = im_start_positions[-4]
+                if pos + 1 < len(sequence) and sequence[pos + 1] == assistant:
+                    next_end = sequence[pos:].eq(im_end).nonzero()
+                    if len(next_end) > 0:
+                        end_pos = pos + next_end[0].item()
+                        # Mark the entire response (including the im_start and im_end tokens)
+                        mask[i, pos:end_pos + 1] = True
+            else:
+                for pos in im_start_positions:
+                    # Check if the token after im_start is "assistant"
+                    if pos + 1 < len(sequence) and sequence[pos + 1] == assistant:
+                    # Find the next im_end
+                        next_end = sequence[pos:].eq(im_end).nonzero()
+                        if len(next_end) > 0:
+                            end_pos = pos + next_end[0].item()
+                            # Mark the entire response (including the im_start and im_end tokens)
+                            mask[i, pos:end_pos + 1] = True
+
+   
+            # 全部assistant回答都算loss
+            # for pos in im_start_positions:
+            #     # Check if the token after im_start is "assistant"
+            #     if pos + 1 < len(sequence) and sequence[pos + 1] == assistant:
+            #         # Find the next im_end
+            #         next_end = sequence[pos:].eq(im_end).nonzero()
+            #         if len(next_end) > 0:
+            #             end_pos = pos + next_end[0].item()
+            #             # Mark the entire response (including the im_start and im_end tokens)
+            #             mask[i, pos:end_pos + 1] = True
 
             # if if_use_weighted:
             #     final_answer_positions = (sequence == answer).nonzero().flatten()
