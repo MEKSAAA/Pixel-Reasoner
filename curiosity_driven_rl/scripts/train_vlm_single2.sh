@@ -101,7 +101,7 @@ RAY_MASTER_NODE_ADDRESS="0.0.0.0"
 RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
 # WORLD_SIZE=1
 # NODE_RANK=0
-# GPUS_PER_NODE=2
+# GPUS_PER_NODE=8
 
 MASTER_HOST="$VC_WORKER_HOSTS"
 MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"
@@ -119,7 +119,7 @@ export VLLM_HOST_IP=0.0.0.0
 working_dir=${working_dir=-"/path/to/workdir"}
 cd $working_dir
 export HF_ENDPOINT=https://hf-mirror.com
-export WANDB_API_KEY="apikey"
+# export WANDB_API_KEY="apikey"
 export WANDB_MODE="offline"
 nvjitlink=""
 nnode=$WORLD_SIZE
@@ -161,7 +161,7 @@ mkdir -p "${SAVE_PATH}"
 
 
 # post_args=(--ref_num_nodes 0
-#         --ref_num_gpus_per_node 8 
+#         --ref_num_gpus_per_node 0 
 #         --actor_num_nodes 4
 #         --actor_num_gpus_per_node 1 
 #         --vllm_num_engines 4 
@@ -259,12 +259,11 @@ ray job submit --address="http://127.0.0.1:8265" \
 --use_kl_estimator_k3 \
 --wandb_project vlm-rl \
 --buffer_norm 0 \
---train_vlm \
 --filter ${filter} \
 --eval_data ${testdata} \
 --eval_sample_ratio 0.1 \
 --data_version ${dataver} \
 --loss_version ${lossver} \
 --format ${fmt} \
+--train_vlm \
 ${post_args[@]} 
-   # --train_vlm 
