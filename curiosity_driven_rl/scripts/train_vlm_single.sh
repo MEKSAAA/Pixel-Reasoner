@@ -99,9 +99,7 @@ find_interface() {
 
 RAY_MASTER_NODE_ADDRESS="0.0.0.0"
 RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
-# WORLD_SIZE=1
-# NODE_RANK=0
-# GPUS_PER_NODE=2
+
 
 MASTER_HOST="$VC_WORKER_HOSTS"
 MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"
@@ -119,7 +117,7 @@ export VLLM_HOST_IP=0.0.0.0
 working_dir=${working_dir=-"/path/to/workdir"}
 cd $working_dir
 export HF_ENDPOINT=https://hf-mirror.com
-export WANDB_API_KEY="apikey"
+# export WANDB_API_KEY="apikey"
 export WANDB_MODE="offline"
 nvjitlink=""
 nnode=$WORLD_SIZE
@@ -156,12 +154,12 @@ DATASET=${trainver:-"/path/to/train.parquet"}
 MODEL_CPK_NAME=${save_name}
 PRETRAIN_MODEL=${policy}
 testdata=${testver:-"/path/to/test.parquet"}
-SAVE_PATH=$working_dir/saves/$save_name
+SAVE_PATH=/data/data/miaojw/agentad3b/$save_name
 mkdir -p "${SAVE_PATH}"
 
 
 post_args=(--ref_num_nodes 0
-        --ref_num_gpus_per_node 8 
+        --ref_num_gpus_per_node 0 
         --actor_num_nodes 4
         --actor_num_gpus_per_node 1 
         --vllm_num_engines 4 
@@ -173,23 +171,22 @@ post_args=(--ref_num_nodes 0
         --rollout_batch_size ${rbuffer}
 )
 
-
 # :/usr/local/cuda/targets/x86_64-linux/lib
 LD_LIBRARY_PATH_VALUE=${nvjitlink}:$LD_LIBRARY_PATH
 export BNB_CUDA_VERSION=122
-RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
-# RUNTIME_ENV_JSON='{
-#   "env_vars": {
-#     "RAY_DEBUG": "legacy",
-#     "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
-#     "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
-#     "PYTORCH_CUDA_ALLOC_CONF": ""
-#   }
-# }'
+# RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
+RUNTIME_ENV_JSON='{
+  "env_vars": {
+    "RAY_DEBUG": "legacy",
+    "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
+    "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
+    "PYTORCH_CUDA_ALLOC_CONF": ""
+  }
+}'
 
-unset RANK LOCAL_RANK WORLD_SIZE NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE VC_WORKER_HOSTS MASTER_HOST MASTER_ADDR
-unset GLOO_SOCKET_IFNAME
-unset NCCL_SOCKET_IFNAME
+# unset RANK LOCAL_RANK WORLD_SIZE NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE VC_WORKER_HOSTS MASTER_HOST MASTER_ADDR
+# unset GLOO_SOCKET_IFNAME
+# unset NCCL_SOCKET_IFNAME
 
 
 # Start Ray head node and capture the output
@@ -204,7 +201,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 --runtime-env-json="$RUNTIME_ENV_JSON" \
 -- python3 -m openrlhf.cli.train_ppo_ray \
 --vllm_enable_sleep \
---vllm_gpu_memory_utilization 0.7 \
+--vllm_gpu_memory_utilization 0.5 \
 --vllm_sync_backend gloo \
 --pretrain $PRETRAIN_MODEL \
 --save_path $SAVE_PATH \
@@ -238,7 +235,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 --ckpt_path $SAVE_PATH \
 --save_steps 3 \
 --eval_steps ${evalsteps} \
---max_ckpt_num 3 \
+--max_ckpt_num 4 \
 --save_hf_ckpt \
 --disable_ds_ckpt \
 --disable_fast_tokenizer \
@@ -247,12 +244,11 @@ ray job submit --address="http://127.0.0.1:8265" \
 --use_kl_estimator_k3 \
 --wandb_project vlm-rl \
 --buffer_norm 0 \
---train_vlm \
 --filter ${filter} \
 --eval_data ${testdata} \
 --eval_sample_ratio 0.1 \
 --data_version ${dataver} \
 --loss_version ${lossver} \
 --format ${fmt} \
+--train_vlm \
 ${post_args[@]} 
-   # --train_vlm 

@@ -26,12 +26,6 @@ from math_verify import parse, verify
 import pickle as pkl
 import re 
 from PIL import Image
-try:
-    import open_clip  # type: ignore
-    _HAS_OPEN_CLIP = True
-except ImportError:
-    open_clip = None  # type: ignore
-    _HAS_OPEN_CLIP = False
 from qwen_agent.tools.base import BaseTool, register_tool
 from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
     NousFnCallPrompt,
@@ -42,15 +36,6 @@ from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
 import pdb  # 添加断点调试
 
 logger = init_logger(__name__)
-
-CLIP_MODEL_NAME = os.getenv("CLIP_MODEL_NAME", "ViT-B-32")
-CLIP_PRETRAINED = os.getenv("CLIP_PRETRAINED", "laion2b_s34b_b79k")
-CLIP_QUERY_IMAGE_PENALTY = float(os.getenv("CLIP_QUERY_IMAGE_PENALTY", "0.3"))
-
-_clip_model = None
-_clip_preprocess = None
-_clip_tokenizer = None
-_clip_device = None
 
 def to_rgb(pil_image: Image.Image) -> Image.Image:
       if pil_image.mode == 'RGBA':
@@ -467,10 +452,10 @@ class Samples:
     uniformity: list[float]
     curiosity_bonus: list[float]
     penalty_bonus: list[float]
-    # round0_saturation: list[float]
-    clip_similarity: list[Optional[float]] = field(default_factory=list)
-    clip_normal_similarity: list[Optional[float]] = field(default_factory=list)
-    clip_penalty: list[float] = field(default_factory=list)
+    iou_bonus: list[float] = field(default_factory=list)  # 新增：IoU奖励
+    anomaly_type_bonus: list[float] = field(default_factory=list)  # 新增：异常类型奖励
+    perceptual_bonus: list[float] = field(default_factory=list)  # 新增：感知奖励（基础正确性+IoU+Type）
+    behavioral_bonus: list[float] = field(default_factory=list)  # 新增：行为奖励（鼓励在不确定时调用query）
 
 def get_raw(modelfamily, text):
     if modelfamily=='dpsk':
@@ -898,19 +883,38 @@ def normalize_answer(answer):
     # if "a.m." in answer: answer = answer.replace("a.m.","")
     return answer
 
-def extract_anomaly_type(sol):
+def extract_all_answers(sol):
+    """
+    提取所有 <answer> 标签内容
+    返回: 列表，包含所有 answer 的内容字符串
+    """
+    try:
+        # 查找所有 <answer> 标签
+        found_all = re.findall(r"<answer>(.*?)</answer>", sol, re.DOTALL)
+        return [ans.strip() for ans in found_all] if found_all else []
+    except Exception as e:
+        print(f"!!!! [debug] Exception in extract_all_answers: {e}")
+        return []
+
+def extract_anomaly_type(sol, use_last=True):
     """
     从模型输出中提取异常类型
     模型输出格式: <answer>{"anomaly_present": true/false, "anomaly_type": "xxx", ...}</answer>
+    
+    Args:
+        sol: 模型输出文本
+        use_last: 是否使用最后一个answer（默认True）。如果False则使用第一个
+    
     返回: 异常类型字符串，如果未找到则返回 None
     """
     try:
-        # 查找 <answer> 标签
-        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
-        if not found:
+        # 查找所有 <answer> 标签
+        all_answers = extract_all_answers(sol)
+        if not all_answers:
             return None
         
-        answer_str = found.group(1).strip()
+        # 根据参数选择使用第一个或最后一个
+        answer_str = all_answers[-1] if use_last else all_answers[0]
         
         # 尝试解析JSON
         try:
@@ -1015,61 +1019,27 @@ def is_anomaly_detection_task(gt, sol=None, qid=None):
     return False
 
 
-def is_invalid_json_output(sol):
-    """
-    检测模型输出是否包含无效的JSON格式（占位符）
-    返回: True 如果是无效输出（应该扣分），False 如果正常
-    """
-    try:
-        # 查找 <answer> 标签
-        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
-        if not found:
-            # 没有 answer 标签，可能还没学会格式
-            return True
-        
-        answer_str = found.group(1).strip()
-        
-        # 检查是否包含占位符（这些是模板格式，不是真实答案）
-        placeholder_patterns = [
-            "true/false",           # {"anomaly_present": true/false}
-            "<label",               # <label or 'none'>
-            '"..."',                # "visual_descriptions": ["..."]
-            "...",                  # 省略号
-        ]
-        
-        for pattern in placeholder_patterns:
-            if pattern in answer_str:
-                return True
-        
-        # 尝试解析JSON
-        try:
-            answer_json = json.loads(answer_str)
-        except json.JSONDecodeError:
-            # JSON 解析失败
-            return True
-        
-        # 检查关键字段
-        if "anomaly_present" not in answer_json:
-            return True
-        
-        # 检查 anomaly_present 是否是有效的布尔值
-        if not isinstance(answer_json["anomaly_present"], bool):
-            return True
-        
-        # 一切正常
-        return False
-        
-    except Exception as e:
-        # 异常也认为是无效输出
-        return True 
 
 
-def extract_anomaly_present(sol) -> Optional[bool]:
+def extract_anomaly_present(sol, use_last=True) -> Optional[bool]:
+    """
+    从模型输出中提取 anomaly_present 字段
+    
+    Args:
+        sol: 模型输出文本
+        use_last: 是否使用最后一个answer（默认True）。如果False则使用第一个
+    
+    返回: anomaly_present 的布尔值，如果未找到则返回 None
+    """
     try:
-        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
-        if not found:
+        # 查找所有 <answer> 标签
+        all_answers = extract_all_answers(sol)
+        if not all_answers:
             return None
-        answer_str = found.group(1).strip()
+        
+        # 根据参数选择使用第一个或最后一个
+        answer_str = all_answers[-1] if use_last else all_answers[0]
+        
         try:
             answer_json = json.loads(answer_str)
         except json.JSONDecodeError as e:
@@ -1084,81 +1054,55 @@ def extract_anomaly_present(sol) -> Optional[bool]:
         return None
 
 
-def extract_visual_descriptions(sol):
-    """從輸出中提取 visual_descriptions 列表。"""
+def check_answer_correctness(sol, gt_is_anomaly, gt_anomaly_type, use_last=True):
+    """
+    检查指定 answer 的正确性（用于 behavioral_reward 计算）
+    
+    Args:
+        sol: 模型输出文本
+        gt_is_anomaly: 真实的 anomaly_present 值
+        gt_anomaly_type: 真实的 anomaly_type 值
+        use_last: 是否检查最后一个answer（默认True）。如果False则检查第一个
+    
+    返回: True 表示正确，False 表示错误，None 表示无法判断
+    """
     try:
-        found = re.search(r"<answer>(.*?)</answer>", sol, re.DOTALL)
-        if not found:
-            return []
-        answer_str = found.group(1).strip()
-        try:
-            answer_json = json.loads(answer_str)
-        except json.JSONDecodeError as e:
-            print(f"!!!! [debug] JSON parsing error in extract_visual_descriptions: {e}, answer_str: {answer_str}")
-            return []
-        descriptions = answer_json.get("visual_descriptions", [])
-        if isinstance(descriptions, str):
-            return [descriptions]
-        if isinstance(descriptions, list):
-            results = []
-            for item in descriptions:
-                if isinstance(item, str):
-                    results.append(item)
-                else:
-                    try:
-                        results.append(str(item))
-                    except Exception:
-                        continue
-            return results
-        return []
+        # 提取 anomaly_present
+        pred_anomaly_present = extract_anomaly_present(sol, use_last=use_last)
+        if pred_anomaly_present is None:
+            return None
+        
+        # 检查 anomaly_present 是否正确
+        if gt_is_anomaly is None:
+            return None
+        
+        if gt_is_anomaly:
+            # 异常样本：需要检查 anomaly_present 和 anomaly_type
+            if pred_anomaly_present != True:
+                return False
+            
+            # 检查 anomaly_type
+            if gt_anomaly_type is None or str(gt_anomaly_type).lower() == 'none':
+                # 如果没有真实的 anomaly_type，只检查 anomaly_present
+                return True
+            
+            pred_anomaly_type = extract_anomaly_type(sol, use_last=use_last)
+            if pred_anomaly_type is None:
+                return False
+            
+            # 比较 anomaly_type（不区分大小写）
+            return pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip()
+        else:
+            # 正常样本：只需要 anomaly_present 为 False
+            return pred_anomaly_present == False
+    
     except Exception as e:
-        print(f"!!!! [debug] Exception in extract_visual_descriptions: {e}")
-        return []
-
-
-def _init_clip_model():
-    global _clip_model, _clip_preprocess, _clip_tokenizer, _clip_device
-    if not _HAS_OPEN_CLIP:
-        return None, None, None, None
-    if any(x is None for x in (_clip_model, _clip_preprocess, _clip_tokenizer, _clip_device)):
-        try:
-            model, _, preprocess = open_clip.create_model_and_transforms(CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED)
-            tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
-            device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
-            model = model.to(device)
-            model.eval()
-            for param in model.parameters():
-                param.requires_grad_(False)
-            _clip_model = model
-            _clip_preprocess = preprocess
-            _clip_tokenizer = tokenizer
-            _clip_device = device
-        except Exception as e:
-            print(f"!!!! [clip] Failed to initialise CLIP model: {e}")
-            _clip_model = _clip_preprocess = _clip_tokenizer = _clip_device = None
-            return None, None, None, None
-    return _clip_model, _clip_preprocess, _clip_tokenizer, _clip_device
-
-
-def compute_clip_similarity(image: Image.Image, text: str) -> Optional[float]:
-    if not _HAS_OPEN_CLIP or not text:
+        print(f"!!!! [debug] Exception in check_answer_correctness: {e}")
         return None
-    model, preprocess, tokenizer, device = _init_clip_model()
-    if model is None or preprocess is None or tokenizer is None or device is None:
-        return None
-    try:
-        image_tensor = preprocess(image.convert("RGB")).unsqueeze(0).to(device)
-        text_tokens = tokenizer([text]).to(device)
-        with torch.no_grad():
-            image_features = model.encode_image(image_tensor)
-            text_features = model.encode_text(text_tokens)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            similarity = (image_features @ text_features.T).item()
-        return float(similarity)
-    except Exception as e:
-        print(f"!!!! [clip] Failed to compute similarity: {e}")
-        return None
+
+
+
+
 
 
 def handle_boxed(sol, gt, eostoken, format_type, requires_box=False, qid=None):
@@ -1761,12 +1705,14 @@ def get_required_messages(messages):
 
 def get_prompt_from_messages(oldformat_messages, prompt_maker, tools, processor):
     messages = get_required_messages(oldformat_messages)
-    if len(tools)>0:
-        messages = [prompt_maker.preprocess_fncall_messages(
-            messages=msg,
-            functions=tools, 
-            lang=None
-        ) for msg in messages]
+    # 注释掉工具添加，因为 system prompt 模板中已经包含了工具定义
+    # 如果使用不包含工具的模板，需要取消下面的注释
+    # if len(tools)>0:
+    #     messages = [prompt_maker.preprocess_fncall_messages(
+    #         messages=msg,
+    #         functions=tools, 
+    #         lang=None
+    #     ) for msg in messages]
 
     messages = [[x.model_dump() for x in conversations] for conversations in messages]
     prompts = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1902,7 +1848,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.q2bbox = dict()  # 存储gt_bbox
         self.q2similar_templates = dict()  # 存储similar_templates
         self.q2anomaly_type = dict()  # 存储anomaly_type
-        self.q2class = dict()  # 存储类别名称
         for dp in self.gt_path:
             # dp = gt_path
             if dp is None: continue 
@@ -1951,9 +1896,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 if 'anomaly_type' in item:
                     self.q2anomaly_type[qid] = item['anomaly_type']
                     print(f'!!!! [anomaly_type] Loaded anomaly_type for qid={qid}: {item["anomaly_type"]}')
-                class_name = item.get('class_name') or item.get('class') or item.get('category')
-                if class_name is not None:
-                    self.q2class[qid] = class_name
         dataver = getattr(self.strategy.args, "data_version", "red")
         if 'use_response' in dataver:
             assert len(self.q2r)>0, "no q2responses for red mode."
@@ -1972,6 +1914,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'query_image']]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
+        
+        # 初始化batch计数器（用于统计记录）
+        self._batch_counter = 0
 
     def separate_qa(self, queries):
         if self.modelfamily=='qwen':
@@ -2271,15 +2216,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             print(f"===> [verbose] shaped_reward={rewards}")
             rewards = torch.FloatTensor(rewards) # a list of tensor, tensor shape = queries shape
         # print('!!!! debug rewards', rewards.shape)
-        clip_similarity_logged = getattr(batched_sample, "clip_similarity", [])
-        clip_normal_similarity_logged = getattr(batched_sample, "clip_normal_similarity", [])
-        clip_penalty_logged = getattr(batched_sample, "clip_penalty", [])
-        if len(clip_similarity_logged) == 0 and len(potential_qids) > 0:
-            clip_similarity_logged = [None] * len(potential_qids)
-        if len(clip_normal_similarity_logged) == 0 and len(potential_qids) > 0:
-            clip_normal_similarity_logged = [None] * len(potential_qids)
-        if len(clip_penalty_logged) == 0 and len(potential_qids) > 0:
-            clip_penalty_logged = [0.0] * len(potential_qids)
 
         info = {
             "reward": rewards, # tensor of shape (queries)
@@ -2306,9 +2242,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             "uniformity": batched_sample.uniformity,
             "curiosity": batched_sample.curiosity_bonus,
             "penalty": batched_sample.penalty_bonus,
-            "clip_similarity": [None if x is None else float(x) for x in clip_similarity_logged],
-            "clip_normal_similarity": [None if x is None else float(x) for x in clip_normal_similarity_logged],
-            "clip_penalty": [float(x) for x in clip_penalty_logged],
         }
             
         if base_action_log_probs is not None:   
@@ -2396,7 +2329,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # print('!!!! [debug] logging on', self.strategy.get_rank())
         if self.strategy.is_rank_0() or is_eval:
             log_file = self.strategy.args.ckpt_path + '/logs'
-            import os 
             os.makedirs(log_file, exist_ok=True)
             log_file += '/sample.'
             
@@ -2430,6 +2362,111 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             
                             entry[k] = v
                         f.write(json.dumps(entry)+'\n')
+        
+        # ========== 实时统计记录（用于训练曲线可视化）==========
+        if not is_eval:
+            stats_file = self.strategy.args.ckpt_path + '/logs/training_stats.txt'
+
+            # 计算各指标的局部和与数量（用于多卡归一化）
+            match_vals = [float(x) for x in info['match']]
+            acc_sum = float(np.sum(match_vals))
+            acc_count = float(len(match_vals))
+
+            reward_vals = info['reward']
+            if isinstance(reward_vals, torch.Tensor):
+                total_reward_sum = float(reward_vals.sum().item())
+                total_reward_count = float(reward_vals.numel())
+            else:
+                total_reward_sum = float(np.sum(reward_vals))
+                total_reward_count = float(len(reward_vals))
+
+            iou_vals = batched_sample.iou_bonus
+            iou_sum = float(np.sum(iou_vals)) if len(iou_vals) > 0 else 0.0
+            iou_count = float(len(iou_vals))
+
+            type_vals = batched_sample.anomaly_type_bonus
+            type_sum = float(np.sum(type_vals)) if len(type_vals) > 0 else 0.0
+            type_count = float(len(type_vals))
+
+            perceptual_vals = batched_sample.perceptual_bonus
+            perceptual_sum = float(np.sum(perceptual_vals)) if len(perceptual_vals) > 0 else 0.0
+            perceptual_count = float(len(perceptual_vals))
+
+            curiosity_vals = batched_sample.curiosity_bonus
+            penalty_vals = batched_sample.penalty_bonus
+            bonus_vals = [c + p for c, p in zip(curiosity_vals, penalty_vals)]
+            bonus_sum = float(np.sum(bonus_vals)) if len(bonus_vals) > 0 else 0.0
+            bonus_count = float(len(bonus_vals))
+
+            device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
+            local_stats = torch.tensor([
+                acc_sum, acc_count,
+                total_reward_sum, total_reward_count,
+                iou_sum, iou_count,
+                type_sum, type_count,
+                perceptual_sum, perceptual_count,
+                bonus_sum, bonus_count,
+            ], dtype=torch.float32, device=device)
+
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                global_stats = self.strategy.all_reduce(local_stats, op="sum")
+            else:
+                global_stats = local_stats
+
+            (acc_sum_g, acc_count_g,
+             total_reward_sum_g, total_reward_count_g,
+             iou_sum_g, iou_count_g,
+             type_sum_g, type_count_g,
+             perceptual_sum_g, perceptual_count_g,
+             bonus_sum_g, bonus_count_g) = global_stats.detach().cpu().tolist()
+
+            def safe_mean(total, count):
+                return float(total / count) if count > 0 else 0.0
+
+            acc = safe_mean(acc_sum_g, acc_count_g)
+            total_reward = safe_mean(total_reward_sum_g, total_reward_count_g)
+            iou_reward = safe_mean(iou_sum_g, iou_count_g)
+            anomaly_type_reward = safe_mean(type_sum_g, type_count_g)
+            perceptual_reward = safe_mean(perceptual_sum_g, perceptual_count_g)
+            bonus_reward = safe_mean(bonus_sum_g, bonus_count_g)
+
+            ablation_mode = os.getenv("ABLATION_MODE", "").lower()
+            if ablation_mode:
+                if "no_iou" in ablation_mode:
+                    iou_reward = 0.0
+                if "no_anomaly_type" in ablation_mode:
+                    anomaly_type_reward = 0.0
+                if "no_bonus" in ablation_mode:
+                    bonus_reward = 0.0
+
+            if self.strategy.is_rank_0():
+                if getattr(self, '_batch_counter', 0) % 20 == 0:
+                    print(
+                        f'!!!! [Stats Debug] step={getattr(self, "_batch_counter", 0)}, '
+                        f'acc={acc:.4f}, total_reward={total_reward:.4f}, '
+                        f'iou_reward={iou_reward:.4f}, type_reward={anomaly_type_reward:.4f}, '
+                        f'perceptual_reward={perceptual_reward:.4f}, '
+                        f'bonus_reward={bonus_reward:.4f}'
+                    )
+
+                os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+                with open(stats_file, 'a') as sf:
+                    # 如果是新文件，先写表头（7列）
+                    if not os.path.exists(stats_file) or os.path.getsize(stats_file) == 0:
+                        sf.write('# step\tacc\ttotal_reward\tiou_reward\ttype_reward\tperceptual_reward\tbonus\n')
+
+                    # 获取当前step（batch计数器，每处理1个batch递增1）
+                    current_step = getattr(self, '_batch_counter', 0)
+                    self._batch_counter = current_step + 1
+
+                    # 写入数据（7列）
+                    sf.write(
+                        f'{current_step}\t{acc:.4f}\t{total_reward:.4f}\t{iou_reward:.4f}\t'
+                        f'{anomaly_type_reward:.4f}\t{perceptual_reward:.4f}\t'
+                        f'{bonus_reward:.4f}\n'
+                    )
+                    sf.flush()
+        
         del sequences, sequences_cpu, action_log_probs, attention_mask, attention_mask_cpu, visual_inputs, visual_inputs_cpu       
         return experience
 
@@ -2620,7 +2657,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_conversations = dict()
         all_images = dict()
         all_raw_images = dict()
-        last_crop_images = dict()
         nsample = 1 if is_eval else args.n_samples_per_prompt
         
         potential_qids = []
@@ -2934,7 +2970,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             print('dumped', targetpath)
                         
                         added = [proc_img]
-                        last_crop_images[uuid] = proc_img.copy()
                         msg_this.append(
                             dict(role='user', content=[
                                 dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
@@ -3028,45 +3063,6 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # peek the responses 
         torch.distributed.barrier()
         
-        clip_similarity_values = [None] * len(all_uids)
-        clip_normal_similarity_values = [None] * len(all_uids)
-        clip_penalty_flags = [0.0] * len(all_uids)
-        if False:  # 禁用 CLIP 相似度计算（原：if _HAS_OPEN_CLIP:）
-            for idx, uuid in enumerate(all_uids):
-                crop_img = last_crop_images.get(uuid)
-                if crop_img is None:
-                    continue
-                sol_text = solutions_round0[idx]
-                anomaly_pred = extract_anomaly_present(sol_text)
-                if anomaly_pred is not True:
-                    continue
-                visual_descs = extract_visual_descriptions(sol_text)
-                if not visual_descs:
-                    continue
-                qid = qids_expanded[idx] if idx < len(qids_expanded) else None
-                class_name = self.q2class.get(qid) if qid else None
-                if class_name:
-                    class_name_fmt = class_name.replace('_', ' ')
-                else:
-                    class_name_fmt = None
-                baseline_sim = None
-                if class_name_fmt:
-                    baseline_text = f"good {class_name_fmt}"
-                    baseline_sim = compute_clip_similarity(crop_img, baseline_text)
-                    if baseline_sim is not None:
-                        clip_normal_similarity_values[idx] = baseline_sim
-                sims = []
-                for desc in visual_descs:
-                    if class_name_fmt:
-                        desc_text = f"{class_name_fmt} with {desc}"
-                    else:
-                        desc_text = desc
-                    sim = compute_clip_similarity(crop_img, desc_text)
-                    if sim is not None:
-                        sims.append(sim)
-                if sims:
-                    clip_similarity_values[idx] = float(np.mean(sims))
-        
         rets_round1 = self.convenient_get_batch_rewards_from_queries(all_qa_texts, qids_expanded)
         difficulty_labels = []
         total = 0
@@ -3076,6 +3072,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         shaped_rewards = []
         curiosity_bonus = []
         penalty_bonus = []
+        iou_bonus = []  # 新增：单独记录IoU奖励
+        anomaly_type_bonus = []  # 新增：单独记录异常类型奖励
+        perceptual_bonus = []  # 新增：单独记录感知奖励（基础正确性+IoU+Type）
+        behavioral_bonus = []  # 新增：单独记录行为奖励（鼓励在不确定时调用query）
+        
+        # 🔍 保存 solutions_round0 的引用（用于提取 anomaly_type）
+        all_solutions = solutions_round0
+        
         for idx in range(0, len(rets_round1), nsample):
             correctness = [x[-1] for x in rets_round1[idx:idx+nsample]]
             group_score = np.mean(correctness)
@@ -3087,46 +3091,85 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 if mres>0.5 and ncall<0.1: 
                     has_correct_without_tool = True 
                     break 
-            rapr = np.mean([ncall>0. for ncall in ntoolcalls])
+            
+            # 🔧 修改：计算 rapr（考虑工具多样性）
+            # 旧逻辑：rapr = 是否使用工具的比例
+            # 新逻辑：rapr = 平均工具调用次数 / 期望次数（2次）
+            rapr_basic = np.mean([ncall > 0.0 for ncall in ntoolcalls]) if len(ntoolcalls) > 0 else 0.0
+            avg_tool_calls = np.mean([min(ncall, 2.0) for ncall in ntoolcalls]) if len(ntoolcalls) > 0 else 0.0
+            rapr = avg_tool_calls / 2.0  # 归一化到 [0, 1]，期望是2次工具调用
+
+            # 统计使用了 query_image 的比例
+            query_rate = np.mean([all_has_query_image_call[idx + i] for i in range(nsample)]) if nsample > 0 else 0.0
+
+            # 🔍 Debug：每10个batch打印一次新机制的状态
+            if nsample > 0 and idx // nsample % 10 == 0:
+                num_with_query = sum([all_has_query_image_call[idx + i] for i in range(nsample)])
+                num_with_both = sum(
+                    [all_has_query_image_call[idx + i] and all_has_bbox_call[idx + i] for i in range(nsample)]
+                )
+                print(
+                    f'!!!! [NEW Curiosity] batch={idx // nsample}, '
+                    f'avg_tools={avg_tool_calls:.2f}, rapr={rapr:.2f}, rapr_basic={rapr_basic:.2f}, '
+                    f'query_rate={query_rate:.2f}, '
+                    f'crop+query={num_with_both}/{nsample}'
+                )
+            
             efficiency_labels.extend([float(has_correct_without_tool)]*nsample)
             this_rewards = []
             discount = 1.0
             this_cur = []
             this_pen = []
+            this_iou = []  # 新增：记录本组的IoU奖励
+            this_type = []  # 新增：记录本组的异常类型奖励
+            this_perceptual = []  # 新增：记录本组的感知奖励
+            this_behavioral = []  # 新增：记录本组的行为奖励
             for iidx, (mres, ncall, isvideo) in enumerate(zip(correctness, ntoolcalls,videoflags)):
                 global_idx = idx + iidx  # 全局索引
                 this_r = float(mres)
                 final_is_error_vo = final_error_flags[global_idx]
                 if this_r>0.5 and final_is_error_vo: # there is a failure for visual operations but the model does not fix it
                     this_r = 0.0 
-                # incentivize select_frames 
-                # curiosity: if rapr==0.5, fair
-                curiosity = 0.0 
+                
+                # 🔧 修改：新的 curiosity 计算逻辑（鼓励使用多个工具）
+                curiosity = 0.0
                 penalty = 0.0
-                if isvideo and ncall>0.1: # for video
-                    curiosity = max(0.3 - rapr, 0.0) / 1.5
-                    curiosity = curiosity / rapr * 0.25 # the maximum curiosity is 0.25
-                    penalty = - 0.05*(ncall-1)
-                    # bonus = max(0.0, discount*(curiosity + penalty)) # curiosity; failure penalty
-                    bonus = discount*(curiosity + penalty)
-                    this_r += bonus 
-                elif ncall>0.1: # for image only when it's correct?
-                    curiosity = max(0.3 - rapr, 0.0) / 2.0
-                    curiosity = curiosity / rapr * 0.25 # the maximum curiosity is 0.25
-                    penalty = - 0.05*(ncall-1)
-                    # bonus = max(0.0, discount*(curiosity + penalty))
-                    bonus = discount*(curiosity + penalty)
+                bonus = 0.0
+
+                # 检查是否使用了 query_image
+                has_query = all_has_query_image_call[global_idx]
+                has_bbox = all_has_bbox_call[global_idx]
+
+                if isvideo and ncall > 0.1:  # for video
+                    # 视频任务：鼓励使用 select_frames
+                    curiosity = max(0.5 - rapr, 0.0) / 1.5
+                    curiosity = curiosity / max(rapr, 0.1) * 0.25
+                    penalty = -0.05 * (ncall - 1)
+                    bonus = curiosity + penalty
                     this_r += bonus
+
+                elif ncall > 0.1:  # for image
+                    # 🎯 根据工具多样性给予不同的激励
+                    if ncall <= 1:
+                        # 只用了1个工具：鼓励使用第二个工具
+                        if not has_query:
+                            # 没有使用 query_image，鼓励使用
+                            curiosity = (query_rate - 1)*0.5
+
+                    # 工具调用惩罚（防止过度使用）
+                    if ncall <= 2:
+                        penalty = 0.0  # 1-2次工具调用不惩罚
+                    else:
+                        penalty = -0.05 * (ncall - 2)  # 超过2次才惩罚
+
+                    if mres < 0.5 and not has_query:  # 原始判断错误且未调用 query_image
+                        curiosity = -0.3
+
+                    bonus = discount * (curiosity + penalty)
+                    this_r += bonus
+
                 
-                # 检查是否是无效的JSON输出（占位符格式），扣0.5分
-                if global_idx < len(all_qa_texts):
-                    solution_text = all_qa_texts[global_idx]
-                    if is_invalid_json_output(solution_text):
-                        invalid_json_penalty = 0.5
-                        this_r -= invalid_json_penalty
-                        print(f'!!!! [invalid JSON penalty] qid={qids_expanded[global_idx] if global_idx < len(qids_expanded) else "unknown"}, penalty={invalid_json_penalty:.4f}, total_reward={this_r:.4f}')
-                
-                # 计算IoU奖励（根据gt_answer和是否有bbox调用）
+                # 计算IoU奖励（简化版：直接使用IoU值）
                 qqid = qids_expanded[global_idx] if global_idx < len(qids_expanded) else None
                 gt_answer = self.q2gt.get(qqid, None) if qqid else None
                 has_bbox_call = all_has_bbox_call[global_idx] if global_idx < len(all_has_bbox_call) else False
@@ -3142,85 +3185,165 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     else:
                         gt_is_anomaly = bool(gt_answer)
                 
-                iou_reward = 0.0
-                if gt_is_anomaly is not None:
-                    
-                    if not gt_is_anomaly:  # gt_answer = false (正常样本)
-                        if not has_bbox_call:
-                            # 没有bbox调用：奖励为0
-                            iou_reward = 0.0
-                        else:
-                            # 有bbox调用：奖励为iou值
-                            iou_reward = iou_value
-                    else:  # gt_answer = true (异常样本)
-                        if not has_bbox_call:
-                            # 没有bbox调用：奖励为0（不惩罚，也不奖励）
-                            iou_reward = 0.0
-                        else:
-                            # 有bbox调用
-                            if iou_value <= 0.0:  # iou为0或接近0
-                                # iou为0：奖励为0（不惩罚）
-                                iou_reward = 0.0
-                            elif iou_value > 0.5:  # iou大于0.5
-                                # iou > 0.5：奖励为1
-                                iou_reward = 1.0
-                            else:
-                                # 0 < iou <= 0.5：奖励为iou值
-                                iou_reward = iou_value
-                else:
-                    # 如果无法获取gt_answer，使用iou值作为奖励（兼容性）
-                    if iou_value > 0:
-                        iou_reward = iou_value
+                # 🔧 简化：IoU奖励 = IoU值（如果有bbox调用）
+                iou_reward = iou_value if has_bbox_call else 0.0
                 
                 # 添加IoU奖励到总奖励
                 this_r += iou_reward
                 if has_bbox_call or iou_reward != 0.0:
-                    print(f'!!!! [IoU reward] qid={qqid}, gt_answer={gt_answer}, has_bbox_call={has_bbox_call}, iou={iou_value:.4f}, iou_reward={iou_reward:.4f}, total_reward={this_r:.4f}')
+                    print(f'!!!! [IoU reward] qid={qqid}, has_bbox_call={has_bbox_call}, iou={iou_value:.4f}, iou_reward={iou_reward:.4f}, total_reward={this_r:.4f}')
                 
-                # 计算异常类型匹配奖励（当gt_answer为true时，如果模型判断的异常类型与测试集中的anomaly_type一致，加0.3分）
+                # 计算异常类型匹配奖励（二值：0或1）
+                # 1. 异常样本：预测的异常类型与GT一致 → 1.0
+                # 2. 正常样本：预测也为正常 → 1.0
+                # 3. 其他情况 → 0.0
                 anomaly_type_reward = 0.0
-                # 只有当gt_answer为true（异常样本）时才检查异常类型匹配
-                if gt_is_anomaly:
-                    gt_anomaly_type = self.q2anomaly_type.get(qqid, None) if qqid else None
-                    if gt_anomaly_type is not None:
-                        # 从模型输出中提取异常类型
-                        if global_idx < len(all_qa_texts):
-                            solution_text = all_qa_texts[global_idx]
+                
+                # 🔍 Debug: 每10个样本打印一次检查流程
+                if global_idx % 10 == 0:
+                    print(f'!!!! [TYPE DEBUG {global_idx}] qid={qqid}, gt_is_anomaly={gt_is_anomaly}')
+                
+                if gt_is_anomaly is not None and global_idx < len(all_solutions):
+                    solution_text = all_solutions[global_idx]
+                    
+                    # 从模型输出中提取 anomaly_present
+                    pred_anomaly_present = extract_anomaly_present(solution_text)
+                    
+                    if gt_is_anomaly:
+                        # 异常样本：检查异常类型匹配
+                        gt_anomaly_type = self.q2anomaly_type.get(qqid, None) if qqid else None
+                        
+                        if global_idx % 10 == 0:
+                            print(f'!!!! [TYPE DEBUG {global_idx}] gt_anomaly_type={gt_anomaly_type}, pred_present={pred_anomaly_present}')
+                        
+                        # 过滤 'none' 字符串
+                        if gt_anomaly_type is not None and str(gt_anomaly_type).lower() != 'none':
                             pred_anomaly_type = extract_anomaly_type(solution_text)
+                            
+                            if global_idx % 10 == 0:
+                                print(f'!!!! [TYPE DEBUG {global_idx}] pred_anomaly_type={pred_anomaly_type}')
                             
                             if pred_anomaly_type is not None:
                                 # 比较预测的异常类型和真实异常类型（不区分大小写）
-                                if pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip():
-                                    anomaly_type_reward = 0.3
+                                is_match = pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip()
+                                
+                                if is_match:
+                                    anomaly_type_reward = 1.0  # 🔧 改为1.0
                                     this_r += anomaly_type_reward
-                                    print(f'!!!! [anomaly_type reward] qid={qqid}, gt_answer={gt_answer}, pred_anomaly_type={pred_anomaly_type}, gt_anomaly_type={gt_anomaly_type}, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
+                                    print(f'!!!! [anomaly_type reward] qid={qqid}, gt_is_anomaly=True, pred_type={pred_anomaly_type}, gt_type={gt_anomaly_type}, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
                                 else:
-                                    print(f'!!!! [anomaly_type mismatch] qid={qqid}, pred_anomaly_type={pred_anomaly_type}, gt_anomaly_type={gt_anomaly_type}')
+                                    if global_idx % 10 == 0:
+                                        print(f'!!!! [anomaly_type mismatch] qid={qqid}, pred={pred_anomaly_type}, gt={gt_anomaly_type}')
+                    else:
+                        # 正常样本：检查是否预测为正常
+                        if global_idx % 10 == 0:
+                            print(f'!!!! [TYPE DEBUG {global_idx}] Normal sample, pred_present={pred_anomaly_present}')
+                        
+                        if pred_anomaly_present is False:
+                            # 正确预测为正常样本
+                            anomaly_type_reward = 1.0  # 🔧 改为1.0
+                            this_r += anomaly_type_reward
+                            print(f'!!!! [normal correct reward] qid={qqid}, gt_is_anomaly=False, pred_present=False, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
                 
-                # 检查判断错误且未调用 query_image 的情况，扣分 0.5
-                # 使用原始判断结果 mres，而不是已经调整过的 this_r
-                has_query_image_call = all_has_query_image_call[global_idx] if global_idx < len(all_has_query_image_call) else False
-                # 禁用 CLIP 惩罚（如需启用，取消下面的注释）
-                if False:  # 原：if clip_sim is not None and clip_normal_sim is not None...
-                    clip_sim = clip_similarity_values[global_idx] if global_idx < len(clip_similarity_values) else None
-                    clip_normal_sim = clip_normal_similarity_values[global_idx] if global_idx < len(clip_normal_similarity_values) else None
-                    if (
-                        clip_sim is not None
-                        and clip_normal_sim is not None
-                        and clip_sim > clip_normal_sim
-                        and has_query_image_call
-                    ):
-                        this_r -= CLIP_QUERY_IMAGE_PENALTY
-                        clip_penalty_flags[global_idx] = CLIP_QUERY_IMAGE_PENALTY
-                        print(f'!!!! [clip penalty] qid={qqid}, abnormal_sim={clip_sim:.4f}, normal_sim={clip_normal_sim:.4f}, penalty={CLIP_QUERY_IMAGE_PENALTY}, total_reward={this_r:.4f}')
-                if mres < 0.5 and not has_query_image_call:  # 原始判断错误且未调用 query_image
-                    query_penalty = 0.5
-                    this_r -= query_penalty
-                    print(f'!!!! [query_image penalty] qid={qqid}, mres={mres:.4f}, judgment_error=True, has_query_image_call=False, penalty={query_penalty:.4f}, total_reward={this_r:.4f}')
+                # 计算感知奖励（Perceptual Reward）= 基础正确性 + IoU + Type
+                perceptual_reward = float(mres) + iou_reward + anomaly_type_reward
+                
+                # 计算行为奖励（Behavioral Reward）：鼓励模型在不确定时才调用 query
+                behavioral_reward = 0.0
+                behavioral_contrib = 0.0
+                # behavioral_reward = 0.0
+                # behavioral_contrib = 0.0
+                # if global_idx < len(all_solutions):
+                #     solution_text = all_solutions[global_idx]
+                #     all_answers = extract_all_answers(solution_text)
+                #     num_answers = len(all_answers)
+                #     
+                #     # 获取真实的 anomaly_type
+                #     gt_anomaly_type = self.q2anomaly_type.get(qqid, None) if qqid else None
+                #     
+                #     # 检查是否调用了 query_image
+                #     has_query = all_has_query_image_call[global_idx] if global_idx < len(all_has_query_image_call) else False
+                #     
+                #     if num_answers == 1:
+                #         # 情况1：只调用了 crop，只有1个answer
+                #         # 检查这个answer是否正确
+                #         is_correct = check_answer_correctness(solution_text, gt_is_anomaly, gt_anomaly_type, use_last=True)
+                #         if is_correct == True:
+                #             behavioral_reward = 1
+                #             if global_idx % 10 == 0:
+                #                 print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers=1, correct=True, reward=1')
+                #         else:
+                #             if global_idx % 10 == 0:
+                #                 print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers=1, correct=False, reward=0.0')
+                #     
+                #     elif num_answers >= 2 and has_query:
+                #         # 情况2：调用了 crop 和 query，有2个或更多answer
+                #         # 检查第一个answer和最后一个answer的正确性
+                #         first_correct = check_answer_correctness(solution_text, gt_is_anomaly, gt_anomaly_type, use_last=False)
+                #         last_correct = check_answer_correctness(solution_text, gt_is_anomaly, gt_anomaly_type, use_last=True)
+                #         
+                #         if first_correct == False and last_correct == True:
+                #             # 第一个错误，最后一个正确：说明 query 有价值
+                #             behavioral_reward = 1.0
+                #             if global_idx % 10 == 0:
+                #                 print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers={num_answers}, first=Wrong, last=Right, reward=1.0')
+                #         elif first_correct == True:
+                #             if global_idx % 10 == 0:
+                #                 print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers={num_answers}, first=Right, reward=0.0 (no need query)')
+                #         else:
+                #             if global_idx % 10 == 0:
+                #                 print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers={num_answers}, first={first_correct}, last={last_correct}, reward=0.0')
+                #     else:
+                #         if global_idx % 10 == 0:
+                #             print(f'!!!! [Behavioral Reward] qid={qqid}, num_answers={num_answers}, has_query={has_query}, reward=0.0 (other case)')
+                # 
+                # behavioral_contrib = behavioral_reward * 0.3
+                # # 添加行为奖励到总奖励
+                # this_r += behavioral_contrib
+                
+                # ========== 消融实验开关 ==========
+                
+                ablation_mode = os.getenv("ABLATION_MODE", "").lower()
+                
+                if ablation_mode:
+                    # 保存原始总奖励用于对比
+                    original_reward = this_r
+                    
+                    # 重新计算：从基础正确性开始
+                    this_r = float(mres)
+                    if this_r > 0.5 and final_is_error_vo:
+                        this_r = 0.0
+                    
+                    # IoU奖励
+                    if "no_iou" not in ablation_mode:
+                        this_r += iou_reward
+                    
+                    # 异常类型奖励
+                    if "no_anomaly_type" not in ablation_mode:
+                        this_r += anomaly_type_reward
+                    
+                    # 行为奖励
+                    # if "no_behavioral" not in ablation_mode:
+                    #     this_r += behavioral_contrib
+                    
+                    # curiosity/penalty bonus
+                    if "no_bonus" not in ablation_mode:
+                        this_r += bonus
+                    
+                    if global_idx % 10 == 0:  # 每10个样本打印一次
+                        print(f'!!!! [ABLATION] mode={ablation_mode}, original={original_reward:.4f}, ablated={this_r:.4f}')
                 
                 this_rewards.append(this_r)
                 this_cur.append(curiosity)
                 this_pen.append(penalty)
+                this_iou.append(iou_reward)  # 新增：保存IoU奖励
+                this_type.append(anomaly_type_reward)  # 新增：保存异常类型奖励
+                this_perceptual.append(perceptual_reward)  # 新增：保存感知奖励
+                this_behavioral.append(behavioral_reward)  # 新增：保存行为奖励
+                
+                # 🔍 Debug：打印 type_reward
+                # if idx // nsample % 20 == 0 and iidx == 0:
+                #     print(f'!!!! [Type Debug] batch={idx//nsample}, iou_reward={iou_reward:.4f}, anomaly_type_reward={anomaly_type_reward:.4f}, qid={qids_expanded[global_idx] if global_idx < len(qids_expanded) else "unknown"}')
             sum_rewards = sum(this_rewards)
             mean_rewards = np.mean(this_rewards)
             is_uniform = False
@@ -3231,6 +3354,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             shaped_rewards.extend(this_rewards)  
             curiosity_bonus.extend(this_cur)
             penalty_bonus.extend(this_pen)
+            iou_bonus.extend(this_iou)  # 新增：添加IoU奖励到总列表
+            anomaly_type_bonus.extend(this_type)  # 新增：添加异常类型奖励到总列表
+            perceptual_bonus.extend(this_perceptual)  # 新增：添加感知奖励到总列表
+            behavioral_bonus.extend(this_behavioral)  # 新增：添加行为奖励到总列表
             uniformity.extend([float(is_uniform)]*nsample)
             if group_score<1./8.:
                 difficulty_labels.extend([0]*nsample)
@@ -3485,7 +3612,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     visual_inputs=visual_inputs,
                     round0_nwait=batch_toolcalls,
                     round0_correctness=batch_correctness, # be careful here because each entry is a tuple: valid, norepeat, usefmt, error_info, usecode, final_correct
-                    round1_nwait=batch_toolfails,
+                    round1_nwait=batch_toolcalls,  # 🔧 修复：应该用 batch_toolcalls 而不是 batch_toolfails
                     round1_correctness=batch_correctness, # be careful here because each entry is a tuple: valid, norepeat, usefmt, error_info, usecode, final_correct
                     questions=batch_q,
                     solutions=batch_s,
@@ -3500,9 +3627,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     uniformity=uniformity[i : i + self.strategy.args.micro_rollout_batch_size],
                     curiosity_bonus=curiosity_bonus[i : i + self.strategy.args.micro_rollout_batch_size],
                     penalty_bonus=penalty_bonus[i : i + self.strategy.args.micro_rollout_batch_size],
-                    clip_similarity=clip_similarity_values[i : i + self.strategy.args.micro_rollout_batch_size],
-                    clip_normal_similarity=clip_normal_similarity_values[i : i + self.strategy.args.micro_rollout_batch_size],
-                    clip_penalty=clip_penalty_flags[i : i + self.strategy.args.micro_rollout_batch_size],
+                    iou_bonus=iou_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
+                    anomaly_type_bonus=anomaly_type_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
+                    perceptual_bonus=perceptual_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
+                    behavioral_bonus=behavioral_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
                 )
             )
 
