@@ -3185,8 +3185,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     else:
                         gt_is_anomaly = bool(gt_answer)
                 
-                # 🔧 简化：IoU奖励 = IoU值（如果有bbox调用）
-                iou_reward = iou_value if has_bbox_call else 0.0
+                # IoU奖励：如果IoU > 0.5则奖励1.0，否则为IoU值
+                if has_bbox_call:
+                    if iou_value > 0.5:
+                        iou_reward = 1.0
+                    else:
+                        iou_reward = iou_value
+                else:
+                    iou_reward = 0.0
                 
                 # 添加IoU奖励到总奖励
                 this_r += iou_reward
@@ -3228,7 +3234,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                 is_match = pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip()
                                 
                                 if is_match:
-                                    anomaly_type_reward = 1.0  # 🔧 改为1.0
+                                    anomaly_type_reward = 0.1
                                     this_r += anomaly_type_reward
                                     print(f'!!!! [anomaly_type reward] qid={qqid}, gt_is_anomaly=True, pred_type={pred_anomaly_type}, gt_type={gt_anomaly_type}, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
                                 else:
@@ -3241,7 +3247,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         
                         if pred_anomaly_present is False:
                             # 正确预测为正常样本
-                            anomaly_type_reward = 1.0  # 🔧 改为1.0
+                            anomaly_type_reward = 0.1  
                             this_r += anomaly_type_reward
                             print(f'!!!! [normal correct reward] qid={qqid}, gt_is_anomaly=False, pred_present=False, reward={anomaly_type_reward:.4f}, total_reward={this_r:.4f}')
                 
