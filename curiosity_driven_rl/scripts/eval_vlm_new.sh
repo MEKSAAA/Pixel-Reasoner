@@ -52,7 +52,7 @@ DATASET=${testdata}
 MODEL_CPK_NAME=${save_name}
 PRETRAIN_MODEL=${policy}
 savefolder=${savefolder:-"eval_results"}
-SAVE_PATH=/data/data/miaojw/agentad3b/${savefolder}/$save_name
+SAVE_PATH=$working_dir/${savefolder}/$save_name
 mkdir -p "${SAVE_PATH}"
 
 
@@ -101,7 +101,8 @@ fi
 
 LD_LIBRARY_PATH_VALUE=$nvj_path:$LD_LIBRARY_PATH
 
-
+export RAY_TMPDIR=/NEW_EDS/miaojw/ray_tmp
+export TMPDIR=/NEW_EDS/miaojw/ray_tmp
 export RAY_USAGE_STATS_ENABLED=0
 
 # RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"MAX_PIXELS\": \"$MAX_PIXELS\", \"MIN_PIXELS\": \"$MIN_PIXELS\", \"RAY_DEBUG\": \"legacy\", \"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
@@ -119,7 +120,7 @@ RUNTIME_ENV_JSON="{
 
 
 
-ray_output=$(ray start --head --num-gpus ${num_gpus} --temp-dir ${RAY_TMPDIR} --port=9399)
+ray_output=$(ray start --head --num-gpus ${num_gpus} --temp-dir ${RAY_TMPDIR} --port=8399)
 
 
 ray status
