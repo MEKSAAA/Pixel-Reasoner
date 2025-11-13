@@ -3334,7 +3334,37 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     
                     # curiosity/penalty bonus
                     if "no_bonus" not in ablation_mode:
-                        this_r += bonus
+                        # 分别处理curiosity和penalty
+                        has_curiosity = "no_curiosity" not in ablation_mode
+                        has_penalty = "no_penalty" not in ablation_mode
+                        
+                        if has_curiosity and has_penalty:
+                            # 两者都保留，添加完整的bonus
+                            this_r += bonus
+                        elif has_curiosity and not has_penalty:
+                            # 只保留curiosity，不添加penalty
+                            # 注意：在图像任务中，bonus = discount * (curiosity + penalty)
+                            # 所以只添加curiosity时，也需要应用discount
+                            if isvideo or ncall > 0.1:
+                                if isvideo:
+                                    this_r += curiosity
+                                else:
+                                    this_r += discount * curiosity
+                        elif not has_curiosity and has_penalty:
+                            # 只保留penalty，不添加curiosity
+                            # 注意：在图像任务中，bonus = discount * (curiosity + penalty)
+                            # 所以只添加penalty时，也需要应用discount
+                            if isvideo or ncall > 0.1:
+                                if isvideo:
+                                    this_r += penalty
+                                else:
+                                    this_r += discount * penalty
+                        else:
+                            # 两者都排除（no_curiosity 和 no_penalty），等同于 no_bonus
+                            pass
+                    else:
+                        # no_bonus时，curiosity和penalty都不添加
+                        pass
                     
                     if global_idx % 10 == 0:  # 每10个样本打印一次
                         print(f'!!!! [ABLATION] mode={ablation_mode}, original={original_reward:.4f}, ablated={this_r:.4f}')
