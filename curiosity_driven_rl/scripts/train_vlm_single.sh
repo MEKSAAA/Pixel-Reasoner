@@ -154,7 +154,7 @@ DATASET=${trainver:-"/path/to/train.parquet"}
 MODEL_CPK_NAME=${save_name}
 PRETRAIN_MODEL=${policy}
 testdata=${testver:-"/path/to/test.parquet"}
-SAVE_PATH=/data/data/miaojw/agentad3b/$save_name
+SAVE_PATH=$working_dir/saves/$save_name
 mkdir -p "${SAVE_PATH}"
 
 
@@ -174,15 +174,15 @@ post_args=(--ref_num_nodes 0
 # :/usr/local/cuda/targets/x86_64-linux/lib
 LD_LIBRARY_PATH_VALUE=${nvjitlink}:$LD_LIBRARY_PATH
 export BNB_CUDA_VERSION=122
-# RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
-RUNTIME_ENV_JSON='{
-  "env_vars": {
-    "RAY_DEBUG": "legacy",
-    "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
-    "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
-    "PYTORCH_CUDA_ALLOC_CONF": ""
-  }
-}'
+RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
+# RUNTIME_ENV_JSON='{
+#   "env_vars": {
+#     "RAY_DEBUG": "legacy",
+#     "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
+#     "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
+#     "PYTORCH_CUDA_ALLOC_CONF": ""
+#   }
+# }'
 
 # unset RANK LOCAL_RANK WORLD_SIZE NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE VC_WORKER_HOSTS MASTER_HOST MASTER_ADDR
 # unset GLOO_SOCKET_IFNAME
