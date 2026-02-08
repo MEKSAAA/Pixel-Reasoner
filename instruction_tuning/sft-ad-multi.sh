@@ -1,6 +1,6 @@
 set -euo pipefail
 export DEBUG_MODE="true"
-RUN_NAME=md_sft_qwen25vl3b1108       # 保持与八卡相同名称（如需区分可自行加后缀）
+RUN_NAME=sft_qwen25vl3b_0123       # 保持与八卡相同名称（如需区分可自行加后缀）
 export LOG_PATH="logs/debug_log_${RUN_NAME}.txt"
 
 MODEL_DIR=/NEW_EDS/miaojw/models/Qwen2.5-VL-3B-Instruct
@@ -28,7 +28,7 @@ python -m torch.distributed.run --nproc_per_node=8 \
   --master_port="29610" \
   instruction_tuning/sft_tool.py \
   --deepspeed instruction_tuning/local_scripts/zero2.json \
-  --output_dir output/${RUN_NAME} \
+  --output_dir /data9/data/miaojw/projects26/agentiad/${RUN_NAME} \
   --model_name_or_path ${MODEL_DIR} \
   --datasetpath ${DATA_JSON} \
   --lr_scheduler_type cosine \
@@ -44,7 +44,7 @@ python -m torch.distributed.run --nproc_per_node=8 \
   --report_to none \
   --gradient_checkpointing true \
   --attn_implementation flash_attention_2 \
-  --num_train_epochs 7 \
+  --num_train_epochs 20 \
   --run_name ${RUN_NAME} \
   --save_strategy epoch \
   --save_steps 150 \

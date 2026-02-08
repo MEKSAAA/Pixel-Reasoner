@@ -10,9 +10,9 @@ export lr=10
 export MAX_PIXELS=4014080 # =[max_image_token]x28x28
 export sys=anomaly_vcot # system prompt version
 export mode=no_eval # [no_eval, eval_only, train]
-export policy=/NEW_EDS/miaojw/projects/Pixel-Reasoner/output/md_sft_qwen25vl3b1029/checkpoint-600
+export policy=export policy=/data/data/miaojw/agentad3b/sft-output/sft7b/checkpoint-1000
 export nvj_path="/NEW_EDS/miaojw/miniconda3_new/envs/curiosity9/lib/python3.10/site-packages/nvidia/nvjitlink/lib"
-export save_name="grpo-3b-no-perceptual-reward"
+export save_name="grpo-7b-no-perceptual-reward"
 
 export ABLATION_MODE="no_iou,no_anomaly_type"
 

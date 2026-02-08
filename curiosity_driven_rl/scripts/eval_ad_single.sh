@@ -4,8 +4,8 @@ export CUDA_VISIBLE_DEVICES=4，6
 
 export working_dir="/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl"
 
-# export policy="/NEW_EDS/miaojw/models/Qwen2.5-VL-7B-Instruct"
-export policy="/NEW_EDS/miaojw/projects/Pixel-Reasoner/output/ad_sft_qwen25vl3b_v1/checkpoint-176"
+export policy="/NEW_EDS/miaojw/models/Qwen2.5-VL-3B-Instruct"
+# export policy="/NEW_EDS/miaojw/projects/Pixel-Reasoner/output/ad_sft_qwen25vl3b_v1/checkpoint-176"
 # export policy="/NEW_EDS/miaojw/projects/Pixel-Reasoner/output/ad_sft_qwen25vl7b_1024/checkpoint-176"
 
 export savefolder=eval
@@ -24,7 +24,7 @@ export tagname=eval_VisA_3b176_vcot_1026
 export num_vllm=2
 export num_gpus=2
 # export tp=1                # tensor parallel
-export util=0.3            # vLLM 显存利用率，卡小就调低些 (0.6~0.7)
+export util=0.7            # vLLM 显存利用率，卡小就调低些 (0.6~0.7)
 export maxlen=8192         # 你脚本默认 8192；不够就再调
 export actor_ngpus=0       # eval_only 下本就不用 actor，多卡才用
 

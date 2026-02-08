@@ -154,7 +154,8 @@ DATASET=${trainver:-"/path/to/train.parquet"}
 MODEL_CPK_NAME=${save_name}
 PRETRAIN_MODEL=${policy}
 testdata=${testver:-"/path/to/test.parquet"}
-SAVE_PATH=$working_dir/saves/$save_name
+SAVE_PATH=/data9/data/miaojw/projects26/agentiad/$save_name
+# SAVE_PATH=$working_dir/saves/$save_name
 mkdir -p "${SAVE_PATH}"
 
 
@@ -174,15 +175,15 @@ post_args=(--ref_num_nodes 0
 # :/usr/local/cuda/targets/x86_64-linux/lib
 LD_LIBRARY_PATH_VALUE=${nvjitlink}:$LD_LIBRARY_PATH
 export BNB_CUDA_VERSION=122
-RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
-# RUNTIME_ENV_JSON='{
-#   "env_vars": {
-#     "RAY_DEBUG": "legacy",
-#     "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
-#     "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
-#     "PYTORCH_CUDA_ALLOC_CONF": ""
-#   }
-# }'
+# RUNTIME_ENV_JSON="{\"pip\": [\"Qwen-Agent\"], \"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\"}}"
+RUNTIME_ENV_JSON='{
+  "env_vars": {
+    "RAY_DEBUG": "legacy",
+    "LD_LIBRARY_PATH": "'$CONDA_PREFIX'/lib:'${NVJITLINK_DIR}'/usr/local/cuda/lib64",
+    "LD_PRELOAD": "'$CONDA_PREFIX'/lib/libstdc++.so.6:'$CONDA_PREFIX'/lib/libgcc_s.so.1",
+    "PYTORCH_CUDA_ALLOC_CONF": ""
+  }
+}'
 
 # unset RANK LOCAL_RANK WORLD_SIZE NODE_RANK MASTER_ADDR MASTER_PORT GPUS_PER_NODE VC_WORKER_HOSTS MASTER_HOST MASTER_ADDR
 # unset GLOO_SOCKET_IFNAME
@@ -201,7 +202,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 --runtime-env-json="$RUNTIME_ENV_JSON" \
 -- python3 -m openrlhf.cli.train_ppo_ray \
 --vllm_enable_sleep \
---vllm_gpu_memory_utilization 0.5 \
+--vllm_gpu_memory_utilization 0.7 \
 --vllm_sync_backend gloo \
 --pretrain $PRETRAIN_MODEL \
 --save_path $SAVE_PATH \

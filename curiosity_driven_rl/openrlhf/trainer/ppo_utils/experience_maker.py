@@ -24,7 +24,7 @@ import json
 # pip install math-verify
 from math_verify import parse, verify
 import pickle as pkl
-import re 
+import re
 from PIL import Image
 from qwen_agent.tools.base import BaseTool, register_tool
 from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
@@ -32,6 +32,7 @@ from qwen_agent.llm.fncall_prompts.nous_fncall_prompt import (
     Message,
     ContentItem,
 )
+from .multimodal_retriever import create_retriever, search_with_retriever
 
 import pdb  # 添加断点调试
 
@@ -231,7 +232,49 @@ Retrieve a normal reference image of the same class for comparison. This functio
             ) from exc
 
 
-   
+@register_tool("search")
+class SearchKnowledge(BaseTool):
+    """Search external knowledge / retrieve relevant passages (Search-R1 style)."""
+
+    @property
+    def description(self):
+        return """
+Search for external knowledge or retrieve relevant passages. Use this when you need factual or domain information not present in the image. Returns top retrieved documents wrapped in <information> and </information>.
+""".strip()
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query string.",
+            }
+        },
+        "required": ["query"]
+    }
+
+    def call(
+        self,
+        query: str,
+        *,
+        topk: int = 5,
+        retriever=None,
+        use_text_index: bool = True,
+        return_results: bool = False,
+    ):
+        """仅使用多模态 CLIP+FAISS 检索（test_retrieval 方式），需配置 search_retriever_config。return_results=True 时返回 dict(text=..., results=...) 以便附带图片。"""
+        query = (query or "").strip()
+        if not query:
+            return {"text": "", "results": []} if return_results else ""
+        if retriever is None:
+            err = "[Search error: no retriever configured. Set search_retriever_config.]"
+            return {"text": err, "results": []} if return_results else err
+        out = search_with_retriever(retriever, query, top_k=topk, use_text_index=use_text_index, return_results=return_results)
+        if return_results:
+            text, results = out
+            return {"text": text, "results": results}
+        return out
+
 
 def extract_qwen_query_and_response(input_text):
     # Split the input text by the assistant's start token
@@ -1566,8 +1609,13 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
     return cropped_img 
 
 do_controlled_rectify = True
-def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid=None, q2similar_templates=None):
+def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid=None, q2similar_templates=None, search_topk=5, retriever=None, search_use_text_index=True):
     # import pdb; pdb.set_trace() # 4.查看images,rawimages,args,toolname,is_video,function
+    if toolname == 'search':
+        query = (args or {}).get('query', '') or ''
+        if function is None:
+            return {"text": "[Search error: search tool handler not available]", "results": []}
+        return function(query, topk=search_topk, retriever=retriever, use_text_index=search_use_text_index, return_results=True)
     if toolname=='query_image':
         if q2similar_templates is None or qid is None:
             assert False, "Execution Error: `query_image` requires qid and q2similar_templates to be provided."
@@ -1908,10 +1956,24 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # self.tools = [CropImageNormalized().function]
         ####### new version
         # self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
-        self.operations = dict(crop_image_normalized=CropImageNormalized(), query_image=QueryImage())
+        self.operations = dict(
+            crop_image_normalized=CropImageNormalized(),
+            query_image=QueryImage(),
+            search=SearchKnowledge(),
+        )
         notool = "notool" in getattr(self.strategy.args, "system_prompt", "none")
-        
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'query_image']]
+        self.search_topk = getattr(self.strategy.args, "search_topk", 5)
+        self.search_use_text_index = getattr(self.strategy.args, "search_use_text_index", True)
+        self.search_retriever = None
+        search_retriever_config = getattr(self.strategy.args, "search_retriever_config", None)
+        if search_retriever_config and os.path.isfile(search_retriever_config):
+            self.search_retriever = create_retriever(search_retriever_config)
+            if self.search_retriever is not None:
+                print(f"!!!! [check] search tool: multimodal retriever (test_retrieval style) from {search_retriever_config}")
+            else:
+                print(f"!!!! [check] search tool: failed to load retriever from {search_retriever_config}")
+        tool_keys = ['crop_image_normalized', 'query_image', 'search']
+        self.tools = [] if notool else [self.operations[k].function for k in tool_keys]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
         
@@ -2917,8 +2979,39 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                     print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
                     
                     # import pdb; pdb.set_trace() # 3.查看raw_result
-                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
-                    if tool_name=='query_image':
+                    raw_result = execute_tool(
+                        imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag,
+                        function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates,
+                        search_topk=getattr(self, 'search_topk', 5),
+                        retriever=getattr(self, 'search_retriever', None),
+                        search_use_text_index=getattr(self, 'search_use_text_index', True),
+                    )
+                    if tool_name == 'search':
+                        if isinstance(raw_result, dict) and "results" in raw_result:
+                            text = (raw_result.get("text") or "").strip()
+                            results = raw_result.get("results") or []
+                            content_parts = [dict(type='text', text="\n<information>{}</information>\n\n".format(text))]
+                            added = []
+                            for i, r in enumerate(results):
+                                meta = r.get("metadata") or {}
+                                path = meta.get("preview_path") or meta.get("image_path")
+                                if path and os.path.isfile(path):
+                                    try:
+                                        img = Image.open(path).convert("RGB")
+                                        proc_img = resize_cropped(img, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                                        added.append(proc_img)
+                                        content_parts.append(dict(type='image', image=path))
+                                    except Exception as _e:
+                                        pass
+                            msg_this.append(dict(role='user', content=content_parts))
+                        else:
+                            added = []
+                            msg_this.append(
+                                dict(role='user', content=[
+                                    dict(type='text', text="\n<information>{}</information>\n\n".format((raw_result if isinstance(raw_result, str) else "").strip())),
+                                ])
+                            )
+                    elif tool_name=='query_image':
                         all_has_query_image_call[out_idx] = True  # 标记有query_image调用
                         # 处理 query_image 工具的结果
                         ref_image = raw_result
