@@ -1,3 +1,4 @@
+*.sh
 curiosity_driven_rl/data/
 curiosity_driven_rl/tooleval/
 output/
@@ -183,3 +184,4 @@ cython_debug/
 .pypirc
 **data**
 **logs**
+
