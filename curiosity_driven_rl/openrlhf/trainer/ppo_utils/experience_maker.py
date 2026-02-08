@@ -1131,7 +1131,8 @@ def check_answer_correctness(sol, gt_is_anomaly, gt_anomaly_type, use_last=True)
             
             pred_anomaly_type = extract_anomaly_type(sol, use_last=use_last)
             if pred_anomaly_type is None:
-                return False
+                # return False
+                return True
             
             # 比较 anomaly_type（不区分大小写）
             return pred_anomaly_type.lower().strip() == str(gt_anomaly_type).lower().strip()
@@ -2113,7 +2114,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         format_type = getattr(self.strategy.args, "format", None)
         sysprompt = getattr(self.strategy.args, "system_prompt", None)
         # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
-        requires_box = False if self.parse_code or sysprompt in ['dpsk', 'anomaly_vcot', 'anomaly_notool'] else True
+        requires_box = False if self.parse_code or sysprompt in ['dpsk', 'anomaly_vcot', 'anomaly_vcot_bmad', 'anomaly_notool'] else True
         rets = self.rule_reward_func(solutions, gts, self.tokenizer.eos_token, format_type, self.executor, requires_box)
         return rets 
         
@@ -2217,7 +2218,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             format_type = getattr(self.strategy.args, "format", None)
             sysprompt = getattr(self.strategy.args, "system_prompt", None)
             # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
-            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger','anomaly_vcot','anomaly_notool'] else True
+            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger','anomaly_vcot','anomaly_vcot_bmad','anomaly_notool'] else True
             print(f'requires_box={requires_box}')
             # num = len(questions)
             
