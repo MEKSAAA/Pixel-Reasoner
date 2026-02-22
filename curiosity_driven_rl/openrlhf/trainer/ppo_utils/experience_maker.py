@@ -23,6 +23,11 @@ import datasets
 import json
 # pip install math-verify
 from math_verify import parse, verify
+try:
+    from openai import OpenAI
+    _OPENAI_AVAILABLE = True
+except ImportError:
+    _OPENAI_AVAILABLE = False
 import pickle as pkl
 import re 
 from PIL import Image
@@ -231,7 +236,92 @@ Retrieve a normal reference image of the same class for comparison. This functio
             ) from exc
 
 
-   
+@register_tool("search")
+class GenerateVisualDescriptionTool(BaseTool):
+    """Search for visual information and generate detailed visual description for industrial inspection."""
+
+    @property
+    def description(self):
+        return """
+Search for relevant visual information about an object or anomaly type, then generate an extremely detailed visual description for industrial visual inspection.
+Use when you need dense visual characteristics: geometric morphology, contour structure, surface texture, color distribution, edge characteristics, etc.
+Output is one dense paragraph of observable visual characteristics only.
+""".strip()
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "description": {
+                "type": "string",
+                "description": "A brief description of a normal or anomalous object to generate detailed visual description for.",
+            },
+        },
+        "required": ["description"],
+    }
+
+    def __init__(self, api_key: Optional[str] = None, base_url: str = "https://api.laozhang.ai/v1", model: str = "gpt-5-mini"):
+        super().__init__()
+        if not _OPENAI_AVAILABLE:
+            raise ImportError("openai is required for GenerateVisualDescriptionTool. Install with: pip install openai")
+        self.api_key = api_key or os.getenv("LAOZHANG_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError("LAOZHANG_API_KEY or OPENAI_API_KEY environment variable is required for GenerateVisualDescriptionTool.")
+        self.client = OpenAI(api_key=self.api_key, base_url=base_url)
+        self.model = model
+
+    def call(self, description: str) -> str:
+        """Generate dense visual description from brief inspection description."""
+        system_prompt = """
+You are a professional web search agent for industrial visual inspection.
+
+Before producing the final output, you MUST internally search the web to retrieve relevant visual information about the described object or anomaly type.
+
+Then generate an extremely detailed visual description.
+
+Strict rules:
+- Output only one dense paragraph.
+- No reasoning.
+- No interpretation.
+- No speculation.
+- No explanation.
+- No mention of search.
+- No conclusions.
+- No safety notes.
+- No bullet points.
+- No formatting.
+- No headings.
+
+The description must include:
+• geometric morphology
+• contour structure
+• surface texture
+• color distribution
+• tonal gradients
+• edge characteristics
+• reflectance behavior
+• fine-grained irregularities
+• spatial contrast with surrounding regions
+
+Focus purely on observable visual characteristics.
+"""
+        user_prompt = f"""
+The following is a short inspection description:
+
+"{description}"
+
+Search for relevant visual information about this object or anomaly type.
+Then produce an extremely detailed visual description based purely on visual characteristics.
+"""
+        completion = self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": user_prompt.strip()}
+            ]
+        )
+        return completion.choices[0].message.content.strip()
+
 
 def extract_qwen_query_and_response(input_text):
     # Split the input text by the assistant's start token
@@ -1568,7 +1658,12 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
 do_controlled_rectify = True
 def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid=None, q2similar_templates=None):
     # import pdb; pdb.set_trace() # 4.查看images,rawimages,args,toolname,is_video,function
-    if toolname=='query_image':
+    if toolname == 'search':
+        description = args.get('description', '')
+        if function is None:
+            raise RuntimeError("Execution Error: search handler is not available.")
+        return function(description=description)
+    elif toolname=='query_image':
         if q2similar_templates is None or qid is None:
             assert False, "Execution Error: `query_image` requires qid and q2similar_templates to be provided."
         if function is None:
@@ -1909,9 +2004,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         ####### new version
         # self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
         self.operations = dict(crop_image_normalized=CropImageNormalized(), query_image=QueryImage())
+        try:
+            self.operations['search'] = GenerateVisualDescriptionTool()
+        except (ImportError, ValueError) as e:
+            logger.warning(f"search tool (GenerateVisualDescriptionTool) not available: {e}")
         notool = "notool" in getattr(self.strategy.args, "system_prompt", "none")
-        
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'query_image']]
+        tool_keys = ['crop_image_normalized', 'query_image']
+        if 'search' in self.operations:
+            tool_keys.append('search')
+        self.tools = [] if notool else [self.operations[k].function for k in tool_keys]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
         
@@ -2804,6 +2905,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         all_iou_rewards = [0.0] * len(qids_expanded)  # 存储IoU奖励
         all_has_bbox_call = [False] * len(qids_expanded)  # 标记是否有bbox调用
         all_has_query_image_call = [False] * len(qids_expanded)  # 标记是否有query_image调用
+        all_has_search_call = [False] * len(qids_expanded)  # 标记是否有search调用（知识检索类工具）
         while True: 
             req_indexlist = []
             req_vllminputs = []
@@ -2918,7 +3020,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     
                     # import pdb; pdb.set_trace() # 3.查看raw_result
                     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
-                    if tool_name=='query_image':
+                    if tool_name == 'search':
+                        all_has_search_call[out_idx] = True  # 标记有search调用
+                        msg_this.append(
+                            dict(role='user', content=[
+                                dict(type='text', text=f"\nHere is the detailed visual description:\n{raw_result}\n")
+                            ])
+                        )
+                        added = []
+                    elif tool_name=='query_image':
                         all_has_query_image_call[out_idx] = True  # 标记有query_image调用
                         # 处理 query_image 工具的结果
                         ref_image = raw_result
@@ -3099,20 +3209,22 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             avg_tool_calls = np.mean([min(ncall, 2.0) for ncall in ntoolcalls]) if len(ntoolcalls) > 0 else 0.0
             rapr = avg_tool_calls / 2.0  # 归一化到 [0, 1]，期望是2次工具调用
 
-            # 统计使用了 query_image 的比例
+            # 统计使用了 query_image / search 的比例
             query_rate = np.mean([all_has_query_image_call[idx + i] for i in range(nsample)]) if nsample > 0 else 0.0
+            search_rate = np.mean([all_has_search_call[idx + i] for i in range(nsample)]) if nsample > 0 and idx + nsample <= len(all_has_search_call) else 0.0
 
             # 🔍 Debug：每10个batch打印一次新机制的状态
             if nsample > 0 and idx // nsample % 10 == 0:
                 num_with_query = sum([all_has_query_image_call[idx + i] for i in range(nsample)])
+                num_with_search = sum([all_has_search_call[idx + i] for i in range(nsample)]) if idx + nsample <= len(all_has_search_call) else 0
                 num_with_both = sum(
                     [all_has_query_image_call[idx + i] and all_has_bbox_call[idx + i] for i in range(nsample)]
                 )
                 print(
                     f'!!!! [NEW Curiosity] batch={idx // nsample}, '
                     f'avg_tools={avg_tool_calls:.2f}, rapr={rapr:.2f}, rapr_basic={rapr_basic:.2f}, '
-                    f'query_rate={query_rate:.2f}, '
-                    f'crop+query={num_with_both}/{nsample}'
+                    f'query_rate={query_rate:.2f}, search_rate={search_rate:.2f}, '
+                    f'crop+query={num_with_both}/{nsample}, search={num_with_search}/{nsample}'
                 )
             
             efficiency_labels.extend([float(has_correct_without_tool)]*nsample)
@@ -3136,8 +3248,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 penalty = 0.0
                 bonus = 0.0
 
-                # 检查是否使用了 query_image
+                # 检查是否使用了 query_image / search（两者均为知识检索类工具）
                 has_query = all_has_query_image_call[global_idx]
+                has_search = all_has_search_call[global_idx] if global_idx < len(all_has_search_call) else False
+                has_knowledge_tool = has_query or has_search  # query_image 或 search 都视为获取额外知识
                 has_bbox = all_has_bbox_call[global_idx]
 
                 if isvideo and ncall > 0.1:  # for video
@@ -3151,9 +3265,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 elif ncall > 0.1:  # for image
                     # 🎯 根据工具多样性给予不同的激励
                     if ncall <= 1:
-                        # 只用了1个工具：鼓励使用第二个工具
-                        if not has_query:
-                            # 没有使用 query_image，鼓励使用
+                        # 只用了1个工具：鼓励使用第二个工具（query_image 或 search）
+                        if not has_knowledge_tool:
+                            # 没有使用 query_image/search 等知识检索工具，鼓励使用
                             curiosity = (query_rate - 1)*0.5
 
                     # 工具调用惩罚（防止过度使用）
@@ -3162,7 +3276,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     else:
                         penalty = -0.05 * (ncall - 2)  # 超过2次才惩罚
 
-                    if mres < 0.5 and not has_query:  # 原始判断错误且未调用 query_image
+                    if mres < 0.5 and not has_knowledge_tool:  # 原始判断错误且未调用 query_image/search
                         curiosity = -0.3
 
                     bonus = discount * (curiosity + penalty)
