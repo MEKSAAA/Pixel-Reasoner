@@ -276,10 +276,10 @@ You are a professional web search agent for industrial visual inspection.
 
 Before producing the final output, you MUST internally search the web to retrieve relevant visual information about the described object or anomaly type.
 
-Then generate an extremely detailed visual description.
+Then generate a concise visual description (2-4 sentences, 80-150 words maximum).
 
 Strict rules:
-- Output only one dense paragraph.
+- Output only one short paragraph. Keep it concise: 2-4 sentences or 80-150 words max.
 - No reasoning.
 - No interpretation.
 - No speculation.
@@ -291,18 +291,7 @@ Strict rules:
 - No formatting.
 - No headings.
 
-The description must include:
-• geometric morphology
-• contour structure
-• surface texture
-• color distribution
-• tonal gradients
-• edge characteristics
-• reflectance behavior
-• fine-grained irregularities
-• spatial contrast with surrounding regions
-
-Focus purely on observable visual characteristics.
+Mention only the most relevant: morphology, contour, texture, color, edges, or contrast. Focus purely on observable visual characteristics.
 """
         user_prompt = f"""
 The following is a short inspection description:
