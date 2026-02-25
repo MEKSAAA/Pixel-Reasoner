@@ -28,6 +28,13 @@ try:
     _OPENAI_AVAILABLE = True
 except ImportError:
     _OPENAI_AVAILABLE = False
+
+try:
+    from zai import ZhipuAiClient
+    _ZHIPU_AVAILABLE = True
+except ImportError:
+    _ZHIPU_AVAILABLE = False
+    ZhipuAiClient = None
 import pickle as pkl
 import re 
 from PIL import Image
@@ -236,6 +243,24 @@ Retrieve a normal reference image of the same class for comparison. This functio
             ) from exc
 
 
+# Search tool: Zhipu web_search + LLM format (visual description)
+SEARCH_SYSTEM_PROMPT = """
+You are a professional industrial visual inspection expert.
+You will be given raw web search results and a search query about a specific defect type, object class, or component.
+Based ONLY on the provided search results, generate a concise visual description for the queried subject.
+Each description MUST be 2-4 sentences, 80-150 words maximum.
+Mention only the most relevant observable characteristics: morphology, contour, texture, color, edges, or contrast.
+
+STRICT OUTPUT RULES:
+- Start your response DIRECTLY with the visual description. No opening phrase whatsoever.
+- Do NOT output any opening sentence, greeting, preamble, or introductory phrase such as 'Of course', 'Here is', 'Sure', 'Below is', 'Certainly', or any similar expression.
+- Do NOT output any analytical, interpretive, or meta commentary.
+- No reasoning. No interpretation. No speculation. No explanation.
+- No mention of search. No conclusions. No safety notes.
+- No bullet points. No extra formatting. No headings.
+""".strip()
+
+
 @register_tool("search")
 class GenerateVisualDescriptionTool(BaseTool):
     """Search for visual information and generate detailed visual description for industrial inspection."""
@@ -259,57 +284,90 @@ Output is one dense paragraph of observable visual characteristics only.
         "required": ["description"],
     }
 
-    def __init__(self, api_key: Optional[str] = None, base_url: str = "https://api.laozhang.ai/v1", model: str = "gpt-5-mini"):
+    def __init__(
+        self,
+        zhipu_api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        base_url: str = "https://api.laozhang.ai/v1",
+        model: str = "gpt-4o-mini",
+    ):
         super().__init__()
+        if not _ZHIPU_AVAILABLE:
+            raise ImportError("zai is required for GenerateVisualDescriptionTool (Zhipu web_search). Install with: pip install zai-sdk")
         if not _OPENAI_AVAILABLE:
-            raise ImportError("openai is required for GenerateVisualDescriptionTool. Install with: pip install openai")
-        self.api_key = api_key or os.getenv("LAOZHANG_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("LAOZHANG_API_KEY or OPENAI_API_KEY environment variable is required for GenerateVisualDescriptionTool.")
-        self.client = OpenAI(api_key=self.api_key, base_url=base_url)
+            raise ImportError("openai is required for GenerateVisualDescriptionTool (LLM format). Install with: pip install openai")
+        # Zhipu API key: from param or export ZHIPU_API_KEY
+        self.zhipu_api_key = zhipu_api_key or os.getenv("ZHIPU_API_KEY")
+        if not self.zhipu_api_key:
+            raise ValueError(
+                "ZHIPU_API_KEY is required for GenerateVisualDescriptionTool. "
+                "Please export ZHIPU_API_KEY before running, e.g.: export ZHIPU_API_KEY=your_key"
+            )
+        self.zhipu_client = ZhipuAiClient(api_key=self.zhipu_api_key)
+        # OpenAI-compatible client for formatting step
+        self.openai_api_key = openai_api_key or os.getenv("LAOZHANG_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if not self.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY or LAOZHANG_API_KEY is required for the format step. "
+                "Please export one of them before running."
+            )
+        self.client = OpenAI(api_key=self.openai_api_key, base_url=base_url)
         self.model = model
 
     def call(self, description: str) -> str:
-        """Generate dense visual description from brief inspection description."""
-        system_prompt = """
-You are a professional web search agent for industrial visual inspection.
+        """Step 1: Zhipu web_search for real results. Step 2: LLM formats into concise visual description."""
+        if not description or not description.strip():
+            return "No description provided."
 
-Before producing the final output, you MUST internally search the web to retrieve relevant visual information about the described object or anomaly type.
+        # Step 1: Zhipu web_search
+        try:
+            resp = self.zhipu_client.web_search.web_search(
+                search_engine="search_pro",
+                search_query=description.strip(),
+                count=3,
+                content_size="high",
+            )
+        except Exception as e:
+            return f"Web search failed: {e}"
 
-Then generate a concise visual description (2-4 sentences, 80-150 words maximum).
+        results = getattr(resp, "search_result", None) or []
+        if not results:
+            return "No relevant content found in search results."
 
-Strict rules:
-- Output only one short paragraph. Keep it concise: 2-4 sentences or 80-150 words max.
-- No reasoning.
-- No interpretation.
-- No speculation.
-- No explanation.
-- No mention of search.
-- No conclusions.
-- No safety notes.
-- No bullet points.
-- No formatting.
-- No headings.
+        snippets = []
+        for i, item in enumerate(results, 1):
+            if isinstance(item, dict):
+                title = item.get("title", "")
+                link = item.get("link", "")
+                media = item.get("media", "")
+                publish_date = item.get("publish_date", "")
+                content = item.get("content", "").strip()
+            else:
+                title = getattr(item, "title", "")
+                link = getattr(item, "link", "")
+                media = getattr(item, "media", "")
+                publish_date = getattr(item, "publish_date", "")
+                content = getattr(item, "content", "").strip()
+            if logger.isEnabledFor(10):  # DEBUG
+                logger.debug("  [%d] %s | %s | %s | %s", i, title, media, publish_date, link)
+            if content:
+                snippets.append(f"[ref_{i}] {content}")
 
-Mention only the most relevant: morphology, contour, texture, color, edges, or contrast. Focus purely on observable visual characteristics.
-"""
-        user_prompt = f"""
-The following is a short inspection description:
+        raw_content = "\n\n".join(snippets)
+        user_prompt = f"Search query: {description.strip()}\n\nSearch results:\n{raw_content}"
 
-"{description}"
-
-Search for relevant visual information about this object or anomaly type.
-Then produce an extremely detailed visual description based purely on visual characteristics.
-"""
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.3,
-            messages=[
-                {"role": "system", "content": system_prompt.strip()},
-                {"role": "user", "content": user_prompt.strip()}
-            ]
-        )
-        return completion.choices[0].message.content.strip()
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.3,
+                messages=[
+                    {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return (completion.choices[0].message.content or "").strip()
+        except Exception as e:
+            return f"Search tool failed: {e}"
 
 
 def extract_qwen_query_and_response(input_text):
@@ -1576,6 +1634,21 @@ def parse_last_tool(output_text):
     # print([output_text])
     # import pdb; pdb.set_trace() # 3.查看output_text
     return json.loads(output_text.split(tool_start)[-1].split(tool_end)[0])
+
+
+def parse_all_tools(output_text):
+    """解析文本中所有 <tool_call>...</tool_call>，返回 [{"name", "arguments"}, ...]。"""
+    parts = output_text.split(tool_start)
+    result = []
+    for i in range(1, len(parts)):
+        block = parts[i].split(tool_end)[0].strip()
+        if not block:
+            continue
+        try:
+            result.append(json.loads(block))
+        except json.JSONDecodeError:
+            continue
+    return result
 
 
 def calculate_iou(bbox1, bbox2):
@@ -2925,7 +2998,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 finish_flag = not require_tool or force_terminate # either it ends with im_end, either it exceeds max length 
                 all_flags[out_idx] = finish_flag
                 final_error_flags[out_idx] = finish_flag and temp_error_flags[out_idx]
-                num_toolcalls[out_idx] += 1 if require_tool else 0
+                n_tools_this_turn = len(parse_all_tools(all_qa_texts[out_idx])) if require_tool else 0
+                num_toolcalls[out_idx] += n_tools_this_turn
                 num_toolfails[out_idx] += 1 if force_terminate else 0
                 
                 if out_idx == 0:
@@ -2945,151 +3019,182 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 video_flag = all_video_flags[out_idx]
                 error_flag = False 
                 temp_error_flags[out_idx] = False
-                tool_params = None
-                try:
-                    # import pdb; pdb.set_trace() # 2.查看tool_params
-                    tool_params = parse_last_tool(qatext) 
-                    tool_name = tool_params['name']
-                    tool_args = tool_params['arguments']
-                    
-                    # 如果是crop_image_normalized工具，保存预测的bbox并计算IoU奖励
-                    if tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
-                        all_has_bbox_call[out_idx] = True  # 标记有bbox调用
-                        pred_bbox = tool_args['bbox_2d']
-                        # 确保bbox是归一化的（如果输入是像素坐标，需要转换）
-                        if len(pred_bbox) == 4:
-                            # 检查bbox是否已经归一化（值在[0,1]范围内）
-                            # 根据工具定义，bbox_2d应该是归一化坐标，但需要确认
-                            is_normalized = all(0 <= x <= 1 for x in pred_bbox)
-                            
-                            if not is_normalized:
-                                # 如果是像素坐标，需要归一化
-                                # 从rawimagelist或imagelist获取图像尺寸
-                                img_size = None
-                                if len(rawimagelist) > 0:
-                                    if isinstance(rawimagelist[0], Image.Image):
-                                        img_size = rawimagelist[0].size
-                                    elif isinstance(rawimagelist[0], list) and len(rawimagelist[0]) > 0:
-                                        if isinstance(rawimagelist[0][0], Image.Image):
-                                            img_size = rawimagelist[0][0].size
-                                
-                                if img_size is not None:
-                                    img_w, img_h = img_size
-                                    pred_bbox = [
-                                        pred_bbox[0]/img_w, 
-                                        pred_bbox[1]/img_h, 
-                                        pred_bbox[2]/img_w, 
-                                        pred_bbox[3]/img_h
-                                    ]
-                                    # 确保归一化后的值在[0,1]范围内
-                                    pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
-                            
-                            all_predicted_bboxes[out_idx] = pred_bbox
-                            
-                            # 计算IoU奖励（实际奖励计算会在后面根据gt_answer进行）
-                            gt_bbox = self.q2bbox.get(qqid, None)
-                            if gt_bbox is not None:
-                                # 确保gt_bbox格式正确，如果是字符串需要解析
-                                if isinstance(gt_bbox, str):
-                                    try:
-                                        gt_bbox = json.loads(gt_bbox)
-                                    except:
-                                        print(f'!!!! [IoU] Warning: Cannot parse gt_bbox as JSON: {gt_bbox}')
-                                        gt_bbox = None
-                                
-                                if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
-                                    # 确保gt_bbox也是归一化的
-                                    if not all(0 <= x <= 1 for x in gt_bbox):
-                                        print(f'!!!! [IoU] Warning: gt_bbox not normalized: {gt_bbox}, treating as normalized anyway')
-                                    
-                                    iou = calculate_iou(pred_bbox, gt_bbox)
-                                    # 先保存IoU值，奖励计算会根据gt_answer在后面进行
-                                    all_iou_rewards[out_idx] = iou  # 先存储原始IoU值
-                                    print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
-                    
-                    # import pdb; pdb.set_trace() # 3.查看raw_result
-                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
-                    if tool_name == 'search':
-                        all_has_search_call[out_idx] = True  # 标记有search调用
-                        msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text=f"\nHere is the detailed visual description:\n{raw_result}\n")
-                            ])
-                        )
-                        added = []
-                    elif tool_name=='query_image':
-                        all_has_query_image_call[out_idx] = True  # 标记有query_image调用
-                        # 处理 query_image 工具的结果
-                        ref_image = raw_result
-                        mtoken = maxtokens[out_idx]
-                        proc_img = resize_cropped(ref_image, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
-                        if do_dump:
-                            proc_img.save(targetpath)
-                            print('dumped', targetpath)
-                        
-                        added = [proc_img]
-                        msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text="\nHere is the normal reference image(Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
-                                dict(type='image', image=targetpath)
-                            ])
-                        )
-                    elif tool_name=='select_frames': 
-                        
-                        selected_frames, info = raw_result 
-                        if not isinstance(info, str): # info is the replacement 
-                            # assert "" in msg_this[-1]['content'][0]['text']
-                            oldtext = msg_this[-1]['content'][0]['text']
-                            newtext = oldtext.replace(str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]), str(info))
-                            msg_this[-1]['content'][0]['text'] = newtext 
-                        
-                        if is_eval:
-                            added = selected_frames
-                        else:
-                            added = [resize_cropped(ff, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else select_maxsize)*28*28) for ff in selected_frames]
-                        
-                        if len(selected_frames)==0:
-                            msg_this.append(
-                                dict(role='user', content=[
-                                    dict(type='text', text=f"\n{info}"),
-                                ] )
-                            )
-                        else:    
-                            msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text="\nHere are the selected frames (Frame Size: {}x{}, Numbered {} to {}):".format(added[0].size[0], added[0].size[1], len(imagelist), len(selected_frames)+len(imagelist)-1)),
-                            ] + [dict(type='image', image=targetpath) for _ in range(len(selected_frames))])
-                            )
-                        
-                    else:
-                        mtoken = maxtokens[out_idx]
-                        proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
-                        if do_dump:
-                            proc_img.save(targetpath)
-                            print('dumped', targetpath)
-                        
-                        added = [proc_img]
-                        msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
-                                dict(type='image', image=targetpath)
-                            ])
-                        )
-                    
-                except Exception as e:
-                    print('!!!!!!! warning')
-                    print(e)
-                    error_info = str(e)
+                all_tool_params = parse_all_tools(qatext)
+                added = []
+                if not all_tool_params:
                     msg_this.append(
                         dict(role='user', content=[
-                            dict(type='text', text=f"\nExecution error:\n{error_info}\n")
-                        ])
-                    )
-                    # breakpoint()
-                    num_toolfails[out_idx] += 1
-                    error_flag = True 
+                            dict(type='text', text="\nExecution error: No valid tool call found.\n")
+                        ]))
+                    error_flag = True
                     temp_error_flags[out_idx] = True
-                    added = []
+                else:
+                    all_crops = all(t.get('name') == 'crop_image_normalized' for t in all_tool_params)
+                    if all_crops and len(all_tool_params) > 0:
+                        # 多个工具均为 crop：依次执行，收集所有裁剪图，用一条 user 消息返回
+                        crop_proc_imgs = []
+                        crop_paths = []
+                        for ti, tool_params in enumerate(all_tool_params):
+                            try:
+                                tool_name = tool_params['name']
+                                tool_args = tool_params['arguments']
+                                if ti == 0 and tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
+                                    all_has_bbox_call[out_idx] = True
+                                    pred_bbox = tool_args['bbox_2d']
+                                    if len(pred_bbox) == 4:
+                                        is_normalized = all(0 <= x <= 1 for x in pred_bbox)
+                                        if not is_normalized:
+                                            img_size = None
+                                            if len(rawimagelist) > 0:
+                                                if isinstance(rawimagelist[0], Image.Image):
+                                                    img_size = rawimagelist[0].size
+                                                elif isinstance(rawimagelist[0], list) and len(rawimagelist[0]) > 0:
+                                                    if isinstance(rawimagelist[0][0], Image.Image):
+                                                        img_size = rawimagelist[0][0].size
+                                            if img_size is not None:
+                                                img_w, img_h = img_size
+                                                pred_bbox = [pred_bbox[0]/img_w, pred_bbox[1]/img_h, pred_bbox[2]/img_w, pred_bbox[3]/img_h]
+                                                pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
+                                        all_predicted_bboxes[out_idx] = pred_bbox
+                                        gt_bbox = self.q2bbox.get(qqid, None)
+                                        if gt_bbox is not None:
+                                            if isinstance(gt_bbox, str):
+                                                try:
+                                                    gt_bbox = json.loads(gt_bbox)
+                                                except:
+                                                    gt_bbox = None
+                                            if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
+                                                iou = calculate_iou(pred_bbox, gt_bbox)
+                                                all_iou_rewards[out_idx] = iou
+                                                print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
+                                raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
+                                proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                                path_i = f"{tfolder}/iter{niter}_{ti}.jpg"
+                                if do_dump:
+                                    proc_img.save(path_i)
+                                    print('dumped', path_i)
+                                crop_proc_imgs.append(proc_img)
+                                crop_paths.append(path_i)
+                            except Exception as e:
+                                print('!!!!!!! warning (crop {}):'.format(ti), e)
+                                msg_this.append(
+                                    dict(role='user', content=[
+                                        dict(type='text', text=f"\nExecution error (crop {ti+1}):\n{str(e)}\n")
+                                    ])
+                                )
+                                num_toolfails[out_idx] += 1
+                                error_flag = True
+                                temp_error_flags[out_idx] = True
+                        if crop_proc_imgs:
+                            content = [dict(type='text', text="\nHere are the cropped images (Image count: {}):".format(len(crop_proc_imgs)))]
+                            for p in crop_paths[:len(crop_proc_imgs)]:
+                                content.append(dict(type='image', image=p))
+                            msg_this.append(dict(role='user', content=content))
+                        added = crop_proc_imgs
+                    else:
+                        # 混合或非 crop：按顺序执行每个工具，每个工具一条 user 消息
+                        for ti, tool_params in enumerate(all_tool_params):
+                            current_targetpath = f"{tfolder}/iter{niter}_{ti}.jpg"
+                            tool_added = []
+                            try:
+                                tool_name = tool_params['name']
+                                tool_args = tool_params['arguments']
+                                if tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
+                                    all_has_bbox_call[out_idx] = True
+                                    pred_bbox = tool_args['bbox_2d']
+                                    if len(pred_bbox) == 4:
+                                        is_normalized = all(0 <= x <= 1 for x in pred_bbox)
+                                        if not is_normalized:
+                                            img_size = None
+                                            if len(rawimagelist) > 0:
+                                                if isinstance(rawimagelist[0], Image.Image):
+                                                    img_size = rawimagelist[0].size
+                                                elif isinstance(rawimagelist[0], list) and len(rawimagelist[0]) > 0:
+                                                    if isinstance(rawimagelist[0][0], Image.Image):
+                                                        img_size = rawimagelist[0][0].size
+                                            if img_size is not None:
+                                                img_w, img_h = img_size
+                                                pred_bbox = [pred_bbox[0]/img_w, pred_bbox[1]/img_h, pred_bbox[2]/img_w, pred_bbox[3]/img_h]
+                                                pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
+                                        all_predicted_bboxes[out_idx] = pred_bbox
+                                        gt_bbox = self.q2bbox.get(qqid, None)
+                                        if gt_bbox is not None:
+                                            if isinstance(gt_bbox, str):
+                                                try:
+                                                    gt_bbox = json.loads(gt_bbox)
+                                                except:
+                                                    gt_bbox = None
+                                            if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
+                                                iou = calculate_iou(pred_bbox, gt_bbox)
+                                                all_iou_rewards[out_idx] = iou
+                                                print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
+                                raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
+                                if tool_name == 'search':
+                                    all_has_search_call[out_idx] = True
+                                    msg_this.append(
+                                        dict(role='user', content=[
+                                            dict(type='text', text=f"\nHere is the detailed visual description:\n{raw_result}\n")
+                                        ])
+                                    )
+                                elif tool_name=='query_image':
+                                    all_has_query_image_call[out_idx] = True
+                                    ref_image = raw_result
+                                    proc_img = resize_cropped(ref_image, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                                    if do_dump:
+                                        proc_img.save(current_targetpath)
+                                        print('dumped', current_targetpath)
+                                    tool_added = [proc_img]
+                                    msg_this.append(
+                                        dict(role='user', content=[
+                                            dict(type='text', text="\nHere is the normal reference image(Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
+                                            dict(type='image', image=current_targetpath)
+                                        ])
+                                    )
+                                elif tool_name=='select_frames':
+                                    selected_frames, info = raw_result
+                                    if not isinstance(info, str):
+                                        oldtext = msg_this[-1]['content'][0]['text']
+                                        newtext = oldtext.replace(str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]), str(info))
+                                        msg_this[-1]['content'][0]['text'] = newtext
+                                    if is_eval:
+                                        tool_added = selected_frames
+                                    else:
+                                        tool_added = [resize_cropped(ff, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else select_maxsize)*28*28) for ff in selected_frames]
+                                    if len(selected_frames)==0:
+                                        msg_this.append(
+                                            dict(role='user', content=[
+                                                dict(type='text', text=f"\n{info}"),
+                                            ])
+                                        )
+                                    else:
+                                        msg_this.append(
+                                            dict(role='user', content=[
+                                                dict(type='text', text="\nHere are the selected frames (Frame Size: {}x{}, Numbered {} to {}):".format(tool_added[0].size[0], tool_added[0].size[1], len(imagelist), len(selected_frames)+len(imagelist)-1)),
+                                            ] + [dict(type='image', image=current_targetpath) for _ in range(len(selected_frames))])
+                                        )
+                                else:
+                                    proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                                    if do_dump:
+                                        proc_img.save(current_targetpath)
+                                        print('dumped', current_targetpath)
+                                    tool_added = [proc_img]
+                                    msg_this.append(
+                                        dict(role='user', content=[
+                                            dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
+                                            dict(type='image', image=current_targetpath)
+                                        ])
+                                    )
+                                added.extend(tool_added)
+                            except Exception as e:
+                                print('!!!!!!! warning (tool {}):'.format(ti), e)
+                                msg_this.append(
+                                    dict(role='user', content=[
+                                        dict(type='text', text=f"\nExecution error:\n{str(e)}\n")
+                                    ])
+                                )
+                                num_toolfails[out_idx] += 1
+                                error_flag = True
+                                temp_error_flags[out_idx] = True
                     
                 new_images = all_images[uuid] + added
                 if len(new_images)>max_imgnum: # the returned is exceeding the max image num
@@ -3783,9 +3888,50 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
 
 if __name__ == "__main__":
+    # ---------- 集成测试：assistant 多 tool_call -> 执行 crop -> 生成 user 消息内容 ----------
+    # SAMPLE_MULTI_CROP = ("""
+    #     To evaluate the image for anomalies, I will first zoom in on the region of interest (ROI).<tool_call>{"name":"crop_image_normalized","arguments":{"bbox_2d":[0.12, 0.3, 0.17, 0.34],"target_image":1}}</tool_call><tool_call>{"name":"crop_image_normalized","arguments":{"bbox_2d":[0.23, 0.33, 0.76, 0.46],"target_image":1}}</tool_call><tool_call>{"name":"crop_image_normalized","arguments":{"bbox_2d":[0.81, 0.37, 0.86, 0.42],"target_image":1}}</tool_call>"""
+    # )
+    # print("========== 集成测试：assistant 多 tool_call -> user 裁剪图输出 ==========")
+    # all_tool_params = parse_all_tools(SAMPLE_MULTI_CROP)
+    # print(f"解析到 {len(all_tool_params)} 个工具: {[t['name'] for t in all_tool_params]}")
+    # # 合成一张图（尺寸足够使 crop 后 >28px）
+    # W, H = 600, 600
+    # synth_img = Image.new("RGB", (W, H), color=(80, 120, 160))
+    # imagelist = [synth_img]
+    # rawimagelist = [synth_img]
+    # tfolder = "/tmp/multi_tool_test"
+    # os.makedirs(tfolder, exist_ok=True)
+    # crop_proc_imgs = []
+    # crop_paths = []
+    # min_px = 4 * 28 * 28
+    # max_px = 512 * 28 * 28
+    # for ti, tool_params in enumerate(all_tool_params):
+    #     tool_name = tool_params["name"]
+    #     tool_args = tool_params["arguments"]
+    #     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=False, function=crop_image_normalized, qid=None, q2similar_templates=None)
+    #     proc_img = resize_cropped(raw_result, min_pixels=min_px, max_pixels=max_px)
+    #     path_i = os.path.join(tfolder, f"crop_{ti}.jpg")
+    #     proc_img.save(path_i)
+    #     crop_proc_imgs.append(proc_img)
+    #     crop_paths.append(path_i)
+    # content = [dict(type="text", text="\nHere are the cropped images (Image count: {}):".format(len(crop_proc_imgs)))]
+    # for p in crop_paths:
+    #     content.append(dict(type="image", image=p))
+    # user_msg = dict(role="user", content=content)
+    # print("生成的 user 消息 (role=user, content=[text + N 张 image]):")
+    # print("  role:", user_msg["role"])
+    # for i, c in enumerate(user_msg["content"]):
+    #     if c["type"] == "text":
+    #         print(f"  content[{i}] text: {c['text'].strip()!r}")
+    #     else:
+    #         print(f"  content[{i}] image: {c['image']}")
+    # print(f"裁剪图已保存到 {tfolder}/")
+    # print("========== 集成测试结束 ==========\n")
+
     sol = "To determine the third step taken if you have suffered from the signs of COVID-19, let's follow the flowchart step by step:\n\n1. **Step 1**: Start isolating.\n2. **Step 2**: Book a test.\n3. **Step 3**: Share contacts via NHS Test and Trace.\n\nThe flowchart clearly indicates that if you have symptoms, you should start by isolating, then book a test, and finally share your contacts with NHS Test and Trace.\n\nTherefore, the third step taken if you have suffered from the signs of COVID-19 is:\n\n\\boxed{Share contacts via NHS Test and Trace}"
     gt = ["\\boxed{share contacts}"]
-    print(rule_reward(sol, gt, "<|im_end|>", "none", requires_box=True))
+    # print(rule_reward(sol, gt, "<|im_end|>", "none", requires_box=True))
     # outputs = '<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{"type": "function", "function": {"name": "crop_image_normalized", "description": "Zoom in on the image based on the bounding box coordinates. It is useful when the object or text in the image is too small to be seen.", "parameters": {"type": "object", "properties": {"bbox_2d": {"type": "array", "description": "coordinates for bounding box of the area you want to zoom in. minimum value is 0 and maximum value is 1.", "items": {"type": "number"}}, "target_image": {"type": "number", "description": "The index of the image to crop. Index from 1 to the number of images. Choose 1 to operate on original image."}}, "required": ["bbox_2d", "target_image"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><image>\nWhat animal is depicted on the Woolshops Shopping Centre sign?\nchoices:\nA: Lion  \nB: Sheep  \nC: Tiger  \nD: Elephant\n\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>assistant\nThe image shows a street with cobblestone pavements, shops, and a signboard for Woolshops Shopping Centre on the left side. The signboard has an animal depicted on it.\n\nTo identify the animal on the sign, I will zoom in on the Woolshops Shopping Centre sign.\n\n<tool_call>\n{"name": "crop_image_normalized", "arguments": {"bbox_2d": [0.1, 0.2, 0.3, 0.4], "target_image":1}}\n</tool_call>'
     # print(parse_last_tool(outputs))
     # ###############
