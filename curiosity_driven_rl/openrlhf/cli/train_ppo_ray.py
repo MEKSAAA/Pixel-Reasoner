@@ -157,8 +157,14 @@ def train(args):
 
     # init reference/reward/actor model
     refs = []
+    # if ref_model is not None:
+    #     refs.extend(ref_model.async_init_model_from_pretrained(strategy, args.pretrain))
+
+    # 修改后：
     if ref_model is not None:
-        refs.extend(ref_model.async_init_model_from_pretrained(strategy, args.pretrain))
+        ref_pretrain = args.ref_pretrain if args.ref_pretrain else args.pretrain  # ← 优先用 ref_pretrain
+        refs.extend(ref_model.async_init_model_from_pretrained(strategy, ref_pretrain))
+
     refs.extend(actor_model.async_init_model_from_pretrained(strategy, args.pretrain))
     if args.reward_pretrain:
         for reward_model, reward_pretrain in zip(reward_models, reward_pretrains):
@@ -346,6 +352,8 @@ if __name__ == "__main__":
 
     #  Models
     parser.add_argument("--pretrain", type=str, default=None, help="HF model name or path")
+    parser.add_argument("--ref_pretrain", type=str, default=None,   # ← 新增这一行
+        help="HF model name or path for reference model. Defaults to --pretrain if not set.")
     parser.add_argument("--reward_pretrain", type=str, default=None, help="HF model name or path")
     parser.add_argument("--remote_rm_url", type=str, default=None, help="remote RM API (HTTP)")
     parser.add_argument("--critic_pretrain", type=str, default=None, help="HF model name or path")

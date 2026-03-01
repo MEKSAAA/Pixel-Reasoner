@@ -118,13 +118,13 @@ class PolicyLoss(nn.Module):
         # The k3 estimator is the non negative kl approximation in
         # http://joschu.net/blog/kl-approx.html
         # Besides non negative, it is also unbiased and have lower variance.
-        # kl_penalty = 0.0 
-        # logp = log_probs.clamp(-5., 0) # .clamp(-0.6)
-        # a = old_log_probs - logp # very large - very small?
-        # # logx <= x-1, so x-1-logx >= 0 
-        # penalty = a.exp() - 1 - a
-        # kl_penalty = penalty.clamp(0., 1.0) 
-        ####################
+        kl_penalty = 0.0 
+        logp = log_probs.clamp(-5., 0) # .clamp(-0.6)
+        a = old_log_probs - logp # very large - very small?
+        # logx <= x-1, so x-1-logx >= 0 
+        penalty = a.exp() - 1 - a
+        kl_penalty = penalty.clamp(0., 1.0)
+        #################### 
         
         
         final = masked_mean(loss, val_mask, dim=None)
@@ -155,7 +155,7 @@ class PolicyLoss(nn.Module):
         # neg_sel = (advantages<0).float() * val_mask # (advantages<0).float() * tmp 
         # ret['weighted_pos_logp'] = masked_mean(log_probs, pos_sel, dim=None)
         # ret['weighted_neg_logp'] = masked_mean(-log_probs, neg_sel, dim=None)
-        # ret['kl_penalty'] = masked_mean(kl_penalty, val_mask, dim=None)
+        ret['kl_penalty'] = masked_mean(kl_penalty, val_mask, dim=None)
         # if action_entropy is not None: 
         #     allneg = (raw_rewards<0.5).float() * (advantages==0).float() * val_mask 
         #     allneg_entropy = masked_mean(action_entropy, allneg, dim=None)
@@ -163,8 +163,9 @@ class PolicyLoss(nn.Module):
         # print(f"!!!! [training] pos logp = {get_print(log_probs,pos_sel)}, neg logp = {get_print(log_probs,neg_sel)}, kl={ret['kl_penalty']}, allneg_entropy={ret['allneg_entropy'] if action_entropy is not None else None}")
         ret['actor_loss'] = final 
         
-        if return_dict: return ret 
-        else: return ret['actor_loss']
+        # if return_dict: return ret 
+        # else: return ret['actor_loss']
+        return ret
         
 class SFTLoss(nn.Module):
     """

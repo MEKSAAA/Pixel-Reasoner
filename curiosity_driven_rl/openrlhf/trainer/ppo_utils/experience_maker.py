@@ -1651,6 +1651,31 @@ def parse_all_tools(output_text):
     return result
 
 
+def bbox_list_to_union(bbox_list):
+    """
+    将单个 bbox 或 bbox 列表转为并集（最小外接框）。
+    - 单个 bbox: [x1, y1, x2, y2] -> 返回规范化的 [x1, y1, x2, y2]
+    - 多个 bbox: [[x1,y1,x2,y2], ...] -> 返回外接框 [min_x1, min_y1, max_x2, max_y2]
+    """
+    if not bbox_list:
+        return None
+    # 统一成「bbox 的列表」
+    if isinstance(bbox_list[0], (int, float)):
+        boxes = [bbox_list]
+    else:
+        boxes = bbox_list
+    try:
+        # 每个 bbox 可能是 (x1,y1,x2,y2) 任意顺序，先规范为左上+右下再取并集
+        x1_min = min(min(float(b[0]), float(b[2])) for b in boxes)
+        y1_min = min(min(float(b[1]), float(b[3])) for b in boxes)
+        x2_max = max(max(float(b[0]), float(b[2])) for b in boxes)
+        y2_max = max(max(float(b[1]), float(b[3])) for b in boxes)
+        return [x1_min, y1_min, x2_max, y2_max]
+    except Exception as e:
+        print(f"!!!! [bbox_list_to_union] Error: {e}, bbox_list={bbox_list}")
+        return None
+
+
 def calculate_iou(bbox1, bbox2):
     """
     计算两个归一化bbox的IoU (Intersection over Union)
@@ -2045,10 +2070,12 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     bbox_key = 'bbox' if 'bbox' in item else 'gt_bbox'
                     self.q2bbox[qid] = item[bbox_key]
                     print(f'!!!! [bbox] Loaded gt_bbox for qid={qid}: {item[bbox_key]}')
-                # 存储similar_templates（如果存在）
+                # 存储similar_templates（如果存在；允许为 None / null）
                 if 'similar_templates' in item:
-                    self.q2similar_templates[qid] = item['similar_templates']
-                    print(f'!!!! [similar_templates] Loaded similar_templates for qid={qid}: {len(item["similar_templates"])} templates')
+                    val = item.get('similar_templates')
+                    self.q2similar_templates[qid] = val if val is not None else []
+                    n = len(self.q2similar_templates[qid])
+                    print(f'!!!! [similar_templates] Loaded similar_templates for qid={qid}: {n} templates')
                 # 存储anomaly_type（如果存在）
                 if 'anomaly_type' in item:
                     self.q2anomaly_type[qid] = item['anomaly_type']
@@ -2871,6 +2898,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             all_video_flags = []
             for i, llm in enumerate(llms):
                 messages = all_messages[i * batch_size : (i + 1) * batch_size]
+                if not messages:
+                    # 当 QAs 数不能整除 (引擎数 * 每引擎 bsz) 时，最后几个引擎会分到空列表，跳过避免 apply_chat_template 报 IndexError
+                    continue
                 batch_qids = qids_expanded[i * batch_size : (i + 1) * batch_size]
                 batch_mtokens = maxtokens[i * batch_size : (i + 1) * batch_size]
                 batch_uids = [f"{qqid}-{xx}" for xx,qqid in zip(range(i * batch_size, i * batch_size+len(batch_qids)), batch_qids)]
@@ -2962,8 +2992,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         final_error_flags = [False for _ in range(len(qids_expanded))]
         do_dump = (getattr(args, "training_mode", "train") in {'eval_only','train'}) and is_eval
         temp_error_flags = [False for _ in range(len(qids_expanded))]
-        # 存储每个样本的bbox和IoU奖励
-        all_predicted_bboxes = [None] * len(qids_expanded)  # 存储模型预测的bbox
+        # 存储每个样本的bbox和IoU奖励（模型可能多次 crop，每个 bbox 放入列表，最后取并集与 gt 并集算 IoU）
+        all_predicted_bboxes = [[] for _ in range(len(qids_expanded))]  # 每个元素为 list of [x1,y1,x2,y2]
         all_iou_rewards = [0.0] * len(qids_expanded)  # 存储IoU奖励
         all_has_bbox_call = [False] * len(qids_expanded)  # 标记是否有bbox调用
         all_has_query_image_call = [False] * len(qids_expanded)  # 标记是否有query_image调用
@@ -2998,7 +3028,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 finish_flag = not require_tool or force_terminate # either it ends with im_end, either it exceeds max length 
                 all_flags[out_idx] = finish_flag
                 final_error_flags[out_idx] = finish_flag and temp_error_flags[out_idx]
-                n_tools_this_turn = len(parse_all_tools(all_qa_texts[out_idx])) if require_tool else 0
+                n_tools_this_turn = len(parse_all_tools(rsp)) if require_tool else 0
                 num_toolcalls[out_idx] += n_tools_this_turn
                 num_toolfails[out_idx] += 1 if force_terminate else 0
                 
@@ -3019,7 +3049,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 video_flag = all_video_flags[out_idx]
                 error_flag = False 
                 temp_error_flags[out_idx] = False
-                all_tool_params = parse_all_tools(qatext)
+                # 只解析当前轮 assistant 回复中的工具调用，避免多轮时重复执行历史轮次的工具（如上一轮的 crop 与当前轮的 query_image 混在一起）
+                all_tool_params = parse_all_tools(rsp)
                 added = []
                 if not all_tool_params:
                     msg_this.append(
@@ -3038,10 +3069,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             try:
                                 tool_name = tool_params['name']
                                 tool_args = tool_params['arguments']
-                                if ti == 0 and tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
+                                if tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
                                     all_has_bbox_call[out_idx] = True
                                     pred_bbox = tool_args['bbox_2d']
-                                    if len(pred_bbox) == 4:
+                                    if isinstance(pred_bbox, list) and len(pred_bbox) == 4:
                                         is_normalized = all(0 <= x <= 1 for x in pred_bbox)
                                         if not is_normalized:
                                             img_size = None
@@ -3054,19 +3085,22 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                             if img_size is not None:
                                                 img_w, img_h = img_size
                                                 pred_bbox = [pred_bbox[0]/img_w, pred_bbox[1]/img_h, pred_bbox[2]/img_w, pred_bbox[3]/img_h]
-                                                pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
-                                        all_predicted_bboxes[out_idx] = pred_bbox
+                                            pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
+                                        all_predicted_bboxes[out_idx].append(pred_bbox)
                                         gt_bbox = self.q2bbox.get(qqid, None)
                                         if gt_bbox is not None:
                                             if isinstance(gt_bbox, str):
                                                 try:
                                                     gt_bbox = json.loads(gt_bbox)
-                                                except:
+                                                except Exception:
                                                     gt_bbox = None
-                                            if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
-                                                iou = calculate_iou(pred_bbox, gt_bbox)
-                                                all_iou_rewards[out_idx] = iou
-                                                print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
+                                            if gt_bbox is not None and isinstance(gt_bbox, list) and len(gt_bbox) > 0:
+                                                pred_union = bbox_list_to_union(all_predicted_bboxes[out_idx])
+                                                gt_union = bbox_list_to_union(gt_bbox)
+                                                if pred_union is not None and gt_union is not None:
+                                                    iou = calculate_iou(pred_union, gt_union)
+                                                    all_iou_rewards[out_idx] = iou
+                                                    print(f'!!!! [IoU] qid={qqid}, pred_union={pred_union}, gt_union={gt_union}, IoU={iou:.4f}')
                                 raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
                                 proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
                                 path_i = f"{tfolder}/iter{niter}_{ti}.jpg"
@@ -3102,7 +3136,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                 if tool_name == 'crop_image_normalized' and 'bbox_2d' in tool_args:
                                     all_has_bbox_call[out_idx] = True
                                     pred_bbox = tool_args['bbox_2d']
-                                    if len(pred_bbox) == 4:
+                                    if isinstance(pred_bbox, list) and len(pred_bbox) == 4:
                                         is_normalized = all(0 <= x <= 1 for x in pred_bbox)
                                         if not is_normalized:
                                             img_size = None
@@ -3115,25 +3149,28 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                             if img_size is not None:
                                                 img_w, img_h = img_size
                                                 pred_bbox = [pred_bbox[0]/img_w, pred_bbox[1]/img_h, pred_bbox[2]/img_w, pred_bbox[3]/img_h]
-                                                pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
-                                        all_predicted_bboxes[out_idx] = pred_bbox
+                                            pred_bbox = [max(0.0, min(1.0, x)) for x in pred_bbox]
+                                        all_predicted_bboxes[out_idx].append(pred_bbox)
                                         gt_bbox = self.q2bbox.get(qqid, None)
                                         if gt_bbox is not None:
                                             if isinstance(gt_bbox, str):
                                                 try:
                                                     gt_bbox = json.loads(gt_bbox)
-                                                except:
+                                                except Exception:
                                                     gt_bbox = None
-                                            if isinstance(gt_bbox, list) and len(gt_bbox) == 4:
-                                                iou = calculate_iou(pred_bbox, gt_bbox)
-                                                all_iou_rewards[out_idx] = iou
-                                                print(f'!!!! [IoU] qid={qqid}, pred_bbox={pred_bbox}, gt_bbox={gt_bbox}, IoU={iou:.4f}')
+                                            if gt_bbox is not None and isinstance(gt_bbox, list) and len(gt_bbox) > 0:
+                                                pred_union = bbox_list_to_union(all_predicted_bboxes[out_idx])
+                                                gt_union = bbox_list_to_union(gt_bbox)
+                                                if pred_union is not None and gt_union is not None:
+                                                    iou = calculate_iou(pred_union, gt_union)
+                                                    all_iou_rewards[out_idx] = iou
+                                                    print(f'!!!! [IoU] qid={qqid}, pred_union={pred_union}, gt_union={gt_union}, IoU={iou:.4f}')
                                 raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call, qid=qqid, q2similar_templates=self.q2similar_templates)
                                 if tool_name == 'search':
                                     all_has_search_call[out_idx] = True
                                     msg_this.append(
                                         dict(role='user', content=[
-                                            dict(type='text', text=f"\nHere is the detailed visual description:\n{raw_result}\n")
+                                            dict(type='text', text=f"\nHere is the search result for your query:\n{raw_result}\n")
                                         ])
                                     )
                                 elif tool_name=='query_image':

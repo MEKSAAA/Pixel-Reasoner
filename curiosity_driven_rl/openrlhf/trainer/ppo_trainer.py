@@ -22,9 +22,7 @@ import numpy as np
 from collections import defaultdict
 import json
 import time
-
-import pdb  # 添加断点调试
-
+import pdb  # 断点调试
 
 
 def read_jsonl(filepath):
@@ -668,7 +666,7 @@ class PPOTrainer(ABC):
             waits = experience.info['round1_nwait']
                 
         print(f"!!!!!!!!! ++++++ already inside training")
-        # pdb.set_trace()  # 🔴 断点5: Actor训练步骤，查看 experience 和 advantages
+        # pdb.set_trace()  # 断点5: Actor训练步骤，查看 experience 和 advantages
         # actor loss
         action_log_probs, output = self.actor(
             sequences, # left padded
@@ -696,6 +694,7 @@ class PPOTrainer(ABC):
         )
         
         actor_loss = actor_loss_dict.get('actor_loss', 0.0)
+        # pdb.set_trace()  # 断点: 查看 actor_loss 等
         aux_loss = actor_loss_dict.get("sft_loss", 0.0)
         entropy_loss = -actor_loss_dict.get("allneg_entropy", 0.0)
         
@@ -706,9 +705,21 @@ class PPOTrainer(ABC):
         else: 
             advlist = [x[-1].item() for x in experience.advantages]
             nonzero = np.mean([x!=0 for x in advlist])
-            print(f'!!!! [training] adv nonzero ratio', nonzero, 'kl penalty ratio', kl_penalty_coef)
-            loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_penalty_coef*actor_loss_dict.get("kl_penalty",0.0) + self.args.entropy_loss_coef * entropy_loss
-            print('!!!! [training] iter', self.iter, f'actorloss={actor_loss.item()}, sftloss={aux_loss if isinstance(aux_loss,float) else aux_loss.item()}, final={loss.item()}, reward={experience.info["reward"]}, adv={advlist}, waits={experience.info["round1_nwait"]}, val={experience.validity}')
+            kl_penalty = actor_loss_dict.get("kl_penalty", 0.0)
+            kl_penalty_val = kl_penalty.item() if hasattr(kl_penalty, 'item') else float(kl_penalty)
+            if self.strategy.is_rank_0():
+                kl_penalty_file = os.path.join(self.args.ckpt_path, 'logs', 'kl_penalty.txt')
+                os.makedirs(os.path.dirname(kl_penalty_file), exist_ok=True)
+                write_header = not os.path.exists(kl_penalty_file) or os.path.getsize(kl_penalty_file) == 0
+                with open(kl_penalty_file, 'a') as f:
+                    if write_header:
+                        f.write('# step\tkl_penalty\n')
+                    f.write(f"{kwargs['global_steps']}\t{kl_penalty_val:.6f}\n")
+                    f.flush()
+            print(f'!!!! [training] adv nonzero ratio', nonzero, 'kl penalty ratio', kl_penalty_coef, 'kl_penalty', kl_penalty_val)
+            loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_penalty_coef*kl_penalty + self.args.entropy_loss_coef * entropy_loss
+            # pdb.set_trace()  # 断点: 查看 loss 等
+            print('!!!! [training] iter', self.iter, f'actorloss={actor_loss.item()}, sftloss={aux_loss if isinstance(aux_loss,float) else aux_loss.item()}, kl_penalty={kl_penalty.item() if hasattr(kl_penalty, "item") else kl_penalty}, final={loss.item()}, reward={experience.info["reward"]}, adv={advlist}, waits={experience.info["round1_nwait"]}, val={experience.validity}')
             
         if not skip: 
             self.strategy.backward(loss, self.actor, self.actor_optim)
