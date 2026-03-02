@@ -2241,7 +2241,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         format_type = getattr(self.strategy.args, "format", None)
         sysprompt = getattr(self.strategy.args, "system_prompt", None)
         # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
-        requires_box = False if self.parse_code or sysprompt in ['dpsk', 'anomaly_vcot', 'anomaly_notool'] else True
+        requires_box = False if self.parse_code or sysprompt in ['dpsk', 'anomaly_vcot', 'anomaly_notool','anomaly_vcot_med','anomaly_vcot_notype_json','anomaly_vcot_notype_qa','anomaly_vcot_mmad'] else True
         rets = self.rule_reward_func(solutions, gts, self.tokenizer.eos_token, format_type, self.executor, requires_box)
         return rets 
         
@@ -2345,7 +2345,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             format_type = getattr(self.strategy.args, "format", None)
             sysprompt = getattr(self.strategy.args, "system_prompt", None)
             # 异常检测任务不需要 boxed 格式，使用 <answer> 格式
-            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger','anomaly_vcot','anomaly_notool'] else True
+            requires_box = False if self.parse_code or sysprompt in ['dpsk','notrigger','anomaly_vcot','anomaly_notool','anomaly_vcot_med','anomaly_vcot_notype_json','anomaly_vcot_notype_qa','anomaly_vcot_mmad'] else True
             print(f'requires_box={requires_box}')
             # num = len(questions)
             
