@@ -268,47 +268,59 @@ def compute_accuracy_from_testjson(
 
     root_abs = os.path.abspath(eval_root)
 
+    # 先遍历 eval_root，记录每个 qid 对应的 conv.json 路径及其一级子目录
+    qid_to_conv: Dict[str, str] = {}
+    qid_to_topdir: Dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(eval_root):
         sample_dir = os.path.basename(dirpath)
         qid_here = qid_from_sample_dirname(sample_dir)
         if qid_here is None:
             continue
 
-        if "conv.json" not in filenames:
-            continue
+        rel_dir = os.path.relpath(os.path.abspath(dirpath), root_abs)
+        parts = rel_dir.split(os.sep)
+        top_dir = parts[0] if len(parts) > 0 else "."
+        qid_to_topdir[qid_here] = top_dir
 
-        conv_path = os.path.join(dirpath, "conv.json")
-        pred = parse_conv_for_pred(conv_path)
-        if pred is None:
-            continue
+        if "conv.json" in filenames:
+            qid_to_conv[qid_here] = os.path.join(dirpath, "conv.json")
 
-        item = test_items.get(qid_here)
-        if item is None:
+    # 再以 test_json 中所有有 gt_answer 的样本为“分母”，
+    # 没有预测或无法解析预测的样本也计入 total_evaluated（视为预测错误）
+    for qid, item in test_items.items():
+        if not isinstance(item, dict) or "gt_answer" not in item:
             continue
 
         gt = bool(item.get("gt_answer"))
         total_evaluated += 1
 
-        # 类别：优先从样本目录名取（如 test_brain_8 -> brain），否则从条目 id 路径取（mvtec/visa/loco/goodsad）
-        category = category_from_dirname(sample_dir)
+        # 类别：优先从 qid 解析（如 test_brain_8 -> brain），否则从条目 id/image 路径取
+        category = category_from_dirname(qid)
         if category is None:
             category = source_from_item(item)
         category_total[category] += 1
-        if gt == pred:
-            total_correct += 1
-            category_correct[category] += 1
 
-        # 收集 AUROC 数据：(y_true, y_score)，pred 作为 score（0/1）
-        category_auroc_data[category][0].append(int(gt))
-        category_auroc_data[category][1].append(int(pred))
+        pred: Optional[bool] = None
+        conv_path = qid_to_conv.get(qid)
+        if conv_path is not None:
+            pred = parse_conv_for_pred(conv_path)
 
-        # topdir（一级子目录）
-        rel = os.path.relpath(os.path.abspath(conv_path), root_abs)
-        parts = rel.split(os.sep)
-        top_dir = parts[0] if len(parts) > 1 else "."
-        topdir_total[top_dir] += 1
-        if gt == pred:
-            topdir_correct[top_dir] += 1
+        # 仅在成功解析出预测时，才统计“预测正确数”及 AUROC/F1 所需的标签
+        if pred is not None:
+            if gt == pred:
+                total_correct += 1
+                category_correct[category] += 1
+
+            # 收集 AUROC/F1 数据：(y_true, y_pred)，pred 作为 0/1 标签
+            category_auroc_data[category][0].append(int(gt))
+            category_auroc_data[category][1].append(int(pred))
+
+            # topdir（一级子目录）统计：只对有 conv.json 的样本统计 per-dir accuracy
+            top_dir = qid_to_topdir.get(qid)
+            if top_dir is not None:
+                topdir_total[top_dir] += 1
+                if gt == pred:
+                    topdir_correct[top_dir] += 1
 
     category_stats: Dict[str, Dict] = {}
     for cat in sorted(category_total.keys()):
@@ -400,6 +412,128 @@ def main() -> None:
     if not os.path.isdir(args.root):
         parser.error(f"路径不存在或不是目录: {args.root}")
 
+    # 先计算准确率相关指标，确保写入报告最上方（即使 --per-file 输出很长也不影响查看）
+    topdir_stats: Dict[str, Dict] = {}
+    acc_lines: List[str] = []
+    if not os.path.isfile(args.test_json):
+        acc_lines.append(f"【准确率】跳过：--test-json 不存在: {args.test_json}")
+    else:
+        (
+            category_stats,
+            topdir_stats,
+            total_correct,
+            total_evaluated,
+            category_auroc_data,
+            overall_f1,
+        ) = compute_accuracy_from_testjson(args.root, args.test_json)
+
+        acc_lines.append("【按数据集(brain/mvtec/visa/loco/goodsad)准确率】（GT= testjson 的 gt_answer；Pred= conv.json 的 <answer>）")
+        if total_evaluated > 0:
+            overall_acc = total_correct / total_evaluated
+            acc_lines.append(f"  总体: {total_correct}/{total_evaluated} = {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+        else:
+            acc_lines.append("  总体: 0/0（没有成功解析出可评测样本）")
+
+        for cat in sorted(category_stats.keys()):
+            s = category_stats[cat]
+            acc_lines.append(f"  {cat}: {s['correct']}/{s['total']} = {s['accuracy']:.4f} ({s['accuracy']*100:.2f}%)")
+
+        # 两大类平均准确率
+        brain_acc_list = [category_stats[c]["accuracy"] for c in CATEGORY_GROUP_BRAIN if c in category_stats and category_stats[c]["total"] > 0]
+        other_acc_list = [category_stats[c]["accuracy"] for c in CATEGORY_GROUP_OTHER_FOUR if c in category_stats and category_stats[c]["total"] > 0]
+        acc_lines.append("")
+        acc_lines.append("【两大类平均准确率】")
+        if brain_acc_list:
+            acc_lines.append(f"  Brain 大类平均: {sum(brain_acc_list) / len(brain_acc_list):.4f}")
+        else:
+            acc_lines.append("  Brain 大类平均: N/A")
+        if other_acc_list:
+            acc_lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_acc_list) / len(other_acc_list):.4f}")
+        else:
+            acc_lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
+
+        # 按数据集及总体输出 F1
+        if f1_score is None:
+            acc_lines.append("")
+            acc_lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) / 总体 F1】跳过：未安装 sklearn（pip install scikit-learn）")
+        else:
+            acc_lines.append("")
+            acc_lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) F1】")
+            for cat in sorted(category_stats.keys()):
+                s = category_stats[cat]
+                f1_val = s.get("f1")
+                if f1_val is not None:
+                    acc_lines.append(f"  {cat}: {f1_val:.4f}")
+                else:
+                    acc_lines.append(f"  {cat}: N/A")
+            if overall_f1 is not None:
+                acc_lines.append(f"  总体: {overall_f1:.4f}")
+            else:
+                acc_lines.append("  总体: N/A")
+            # 两大类平均：brain 一大类，其余四类(mvtec/visa/loco/goodsad)一大类
+            brain_f1_list = [category_stats[c]["f1"] for c in CATEGORY_GROUP_BRAIN if c in category_stats and category_stats[c].get("f1") is not None]
+            other_f1_list = [category_stats[c]["f1"] for c in CATEGORY_GROUP_OTHER_FOUR if c in category_stats and category_stats[c].get("f1") is not None]
+            acc_lines.append("")
+            acc_lines.append("【两大类平均 F1】")
+            if brain_f1_list:
+                acc_lines.append(f"  Brain 大类平均: {sum(brain_f1_list) / len(brain_f1_list):.4f}")
+            else:
+                acc_lines.append("  Brain 大类平均: N/A")
+            if other_f1_list:
+                acc_lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_f1_list) / len(other_f1_list):.4f}")
+            else:
+                acc_lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
+
+        # 计算并按数据集输出 AUROC（需要 sklearn）
+        if roc_auc_score is None:
+            acc_lines.append("")
+            acc_lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) AUROC】跳过：未安装 sklearn（pip install scikit-learn）")
+        elif category_auroc_data:
+            acc_lines.append("")
+            acc_lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) AUROC】")
+            cat_auroc_values: Dict[str, Optional[float]] = {}
+            for cat in sorted(category_auroc_data.keys()):
+                y_true, y_score = category_auroc_data[cat]
+                if len(y_true) < 2:
+                    acc_lines.append(f"  {cat}: N/A（样本数不足）")
+                    cat_auroc_values[cat] = None
+                elif len(set(y_true)) < 2:
+                    acc_lines.append(f"  {cat}: N/A（仅单一类别）")
+                    cat_auroc_values[cat] = None
+                else:
+                    try:
+                        auroc = roc_auc_score(y_true, y_score)
+                        acc_lines.append(f"  {cat}: {auroc:.4f}")
+                        cat_auroc_values[cat] = auroc
+                    except ValueError:
+                        acc_lines.append(f"  {cat}: N/A")
+                        cat_auroc_values[cat] = None
+            # 总体 AUROC
+            all_y_true = []
+            all_y_score = []
+            for yt, ys in category_auroc_data.values():
+                all_y_true.extend(yt)
+                all_y_score.extend(ys)
+            if len(all_y_true) >= 2 and len(set(all_y_true)) >= 2:
+                try:
+                    overall_auroc = roc_auc_score(all_y_true, all_y_score)
+                    acc_lines.append(f"  总体: {overall_auroc:.4f}")
+                except ValueError:
+                    pass
+            # 两大类平均 AUROC
+            brain_auroc_list = [cat_auroc_values[c] for c in CATEGORY_GROUP_BRAIN if c in cat_auroc_values and cat_auroc_values[c] is not None]
+            other_auroc_list = [cat_auroc_values[c] for c in CATEGORY_GROUP_OTHER_FOUR if c in cat_auroc_values and cat_auroc_values[c] is not None]
+            acc_lines.append("")
+            acc_lines.append("【两大类平均 AUROC】")
+            if brain_auroc_list:
+                acc_lines.append(f"  Brain 大类平均: {sum(brain_auroc_list) / len(brain_auroc_list):.4f}")
+            else:
+                acc_lines.append("  Brain 大类平均: N/A")
+            if other_auroc_list:
+                acc_lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_auroc_list) / len(other_auroc_list):.4f}")
+            else:
+                acc_lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
+
     json_files = sorted(iter_json_files(args.root))
     if not json_files:
         print(f"未在目录 {args.root} 下找到任何 JSON 文件。")
@@ -460,128 +594,6 @@ def main() -> None:
                 lines.append(f"  - {rel_path}: {format_counts(counts)}{suffix}")
 
 
-    # 计算准确率（必须提供 --test-json）
-    topdir_stats: Dict[str, Dict] = {}
-    if not os.path.isfile(args.test_json):
-        lines.append("")
-        lines.append(f"【准确率】跳过：--test-json 不存在: {args.test_json}")
-    else:
-        (
-            category_stats,
-            topdir_stats,
-            total_correct,
-            total_evaluated,
-            category_auroc_data,
-            overall_f1,
-        ) = compute_accuracy_from_testjson(args.root, args.test_json)
-
-        lines.append("")
-        lines.append("【按数据集(brain/mvtec/visa/loco/goodsad)准确率】（GT= testjson 的 gt_answer；Pred= conv.json 的 <answer>）")
-        if total_evaluated > 0:
-            overall_acc = total_correct / total_evaluated
-            lines.append(f"  总体: {total_correct}/{total_evaluated} = {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-        else:
-            lines.append("  总体: 0/0（没有成功解析出可评测样本）")
-
-        for cat in sorted(category_stats.keys()):
-            s = category_stats[cat]
-            lines.append(f"  {cat}: {s['correct']}/{s['total']} = {s['accuracy']:.4f} ({s['accuracy']*100:.2f}%)")
-        # 两大类平均准确率
-        brain_acc_list = [category_stats[c]["accuracy"] for c in CATEGORY_GROUP_BRAIN if c in category_stats and category_stats[c]["total"] > 0]
-        other_acc_list = [category_stats[c]["accuracy"] for c in CATEGORY_GROUP_OTHER_FOUR if c in category_stats and category_stats[c]["total"] > 0]
-        lines.append("")
-        lines.append("【两大类平均准确率】")
-        if brain_acc_list:
-            lines.append(f"  Brain 大类平均: {sum(brain_acc_list) / len(brain_acc_list):.4f}")
-        else:
-            lines.append("  Brain 大类平均: N/A")
-        if other_acc_list:
-            lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_acc_list) / len(other_acc_list):.4f}")
-        else:
-            lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
-
-        # 按数据集及总体输出 F1
-        if f1_score is None:
-            lines.append("")
-            lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) / 总体 F1】跳过：未安装 sklearn（pip install scikit-learn）")
-        else:
-            lines.append("")
-            lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) F1】")
-            for cat in sorted(category_stats.keys()):
-                s = category_stats[cat]
-                f1_val = s.get("f1")
-                if f1_val is not None:
-                    lines.append(f"  {cat}: {f1_val:.4f}")
-                else:
-                    lines.append(f"  {cat}: N/A")
-            if overall_f1 is not None:
-                lines.append(f"  总体: {overall_f1:.4f}")
-            else:
-                lines.append("  总体: N/A")
-            # 两大类平均：brain 一大类，其余四类(mvtec/visa/loco/goodsad)一大类
-            brain_f1_list = [category_stats[c]["f1"] for c in CATEGORY_GROUP_BRAIN if c in category_stats and category_stats[c].get("f1") is not None]
-            other_f1_list = [category_stats[c]["f1"] for c in CATEGORY_GROUP_OTHER_FOUR if c in category_stats and category_stats[c].get("f1") is not None]
-            lines.append("")
-            lines.append("【两大类平均 F1】")
-            if brain_f1_list:
-                lines.append(f"  Brain 大类平均: {sum(brain_f1_list) / len(brain_f1_list):.4f}")
-            else:
-                lines.append("  Brain 大类平均: N/A")
-            if other_f1_list:
-                lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_f1_list) / len(other_f1_list):.4f}")
-            else:
-                lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
-
-        # 计算并按数据集输出 AUROC（需要 sklearn）
-        if roc_auc_score is None:
-            lines.append("")
-            lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) AUROC】跳过：未安装 sklearn（pip install scikit-learn）")
-        elif category_auroc_data:
-            lines.append("")
-            lines.append("【按数据集(brain/mvtec/visa/loco/goodsad) AUROC】")
-            cat_auroc_values: Dict[str, Optional[float]] = {}
-            for cat in sorted(category_auroc_data.keys()):
-                y_true, y_score = category_auroc_data[cat]
-                if len(y_true) < 2:
-                    lines.append(f"  {cat}: N/A（样本数不足）")
-                    cat_auroc_values[cat] = None
-                elif len(set(y_true)) < 2:
-                    lines.append(f"  {cat}: N/A（仅单一类别）")
-                    cat_auroc_values[cat] = None
-                else:
-                    try:
-                        auroc = roc_auc_score(y_true, y_score)
-                        lines.append(f"  {cat}: {auroc:.4f}")
-                        cat_auroc_values[cat] = auroc
-                    except ValueError:
-                        lines.append(f"  {cat}: N/A")
-                        cat_auroc_values[cat] = None
-            # 总体 AUROC
-            all_y_true = []
-            all_y_score = []
-            for yt, ys in category_auroc_data.values():
-                all_y_true.extend(yt)
-                all_y_score.extend(ys)
-            if len(all_y_true) >= 2 and len(set(all_y_true)) >= 2:
-                try:
-                    overall_auroc = roc_auc_score(all_y_true, all_y_score)
-                    lines.append(f"  总体: {overall_auroc:.4f}")
-                except ValueError:
-                    pass
-            # 两大类平均 AUROC
-            brain_auroc_list = [cat_auroc_values[c] for c in CATEGORY_GROUP_BRAIN if c in cat_auroc_values and cat_auroc_values[c] is not None]
-            other_auroc_list = [cat_auroc_values[c] for c in CATEGORY_GROUP_OTHER_FOUR if c in cat_auroc_values and cat_auroc_values[c] is not None]
-            lines.append("")
-            lines.append("【两大类平均 AUROC】")
-            if brain_auroc_list:
-                lines.append(f"  Brain 大类平均: {sum(brain_auroc_list) / len(brain_auroc_list):.4f}")
-            else:
-                lines.append("  Brain 大类平均: N/A")
-            if other_auroc_list:
-                lines.append(f"  其他四类(mvtec/visa/loco/goodsad)平均: {sum(other_auroc_list) / len(other_auroc_list):.4f}")
-            else:
-                lines.append("  其他四类(mvtec/visa/loco/goodsad)平均: N/A")
-
     # 一级子目录统计：工具调用次数 + 是否判断正确：工具调用次数 + 是否判断正确
     lines.append("")
     lines.append("按一级子目录统计:")
@@ -592,7 +604,12 @@ def main() -> None:
             line += f" | 判断正确: {s['correct']}/{s['total']} ({s['accuracy']*100:.2f}%)"
         lines.append(line)
 
-    report = "\n".join(lines)
+    report_lines: List[str] = []
+    if acc_lines:
+        report_lines.extend(acc_lines)
+        report_lines.append("")
+    report_lines.extend(lines)
+    report = "\n".join(report_lines)
     print(report)
 
     # 输出报告 txt
