@@ -30,6 +30,11 @@
 <sup>&Dagger;</sup>Correspondence.
 </span>
 
+## 数据统计
+Pixel-Reasoner/stats/count_acc_tool_usage_f1.py
+
+
+使用方法：python count_acc_tool_usage_f1.py /NEW_EDS/.../eval/eval_3biadsft_btmri/logs/dumps_iter0 --test-json /NEW_EDS/.../mix-test8000.json
 
 
 ## 🔥News
