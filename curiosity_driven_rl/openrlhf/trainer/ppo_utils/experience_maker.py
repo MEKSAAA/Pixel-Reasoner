@@ -449,8 +449,8 @@ Output is one dense paragraph of observable visual characteristics only.
         """
         description = (description or "").strip()
 
-        use_brain = qid is not None and "brain" in str(qid).lower()
-        # use_brain = True
+        # use_brain = qid is not None and "brain" in str(qid).lower()
+        use_brain = True
 
         if use_brain:
             # 现有逻辑：Zhipu web_search + LLM 格式化
