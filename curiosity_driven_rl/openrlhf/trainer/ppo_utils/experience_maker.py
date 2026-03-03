@@ -743,6 +743,7 @@ class Samples:
     anomaly_type_bonus: list[float] = field(default_factory=list)  # 新增：异常类型奖励
     perceptual_bonus: list[float] = field(default_factory=list)  # 新增：感知奖励（基础正确性+IoU+Type）
     behavioral_bonus: list[float] = field(default_factory=list)  # 新增：行为奖励（鼓励在不确定时调用query）
+    tool_format_rewards: list[float] = field(default_factory=list)  # 工具调用格式奖励：格式正确 0，格式错误 -1
 
 def get_raw(modelfamily, text):
     if modelfamily=='dpsk':
@@ -1786,6 +1787,38 @@ def parse_last_tool(output_text):
     return json.loads(output_text.split(tool_start)[-1].split(tool_end)[0])
 
 
+def _is_valid_tool_call_format(obj, operations=None):
+    """
+    检查解析出的单个对象是否符合工具调用格式：
+    - 必须是 dict，且包含 'name' (str) 和 'arguments' (dict)
+    - 若提供 operations（工具名 -> 工具实例），则：
+      - name 必须在 operations 中
+      - arguments 的 key 必须全部在该工具的 parameters["properties"] 中
+      - 例如 query_image 的 properties 为空，则 arguments 必须为 {}
+    """
+    if not isinstance(obj, dict):
+        return False
+    name = obj.get('name')
+    args = obj.get('arguments')
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return False
+    if operations is None:
+        return True
+    if name not in operations:
+        return False
+    tool = operations[name]
+    params_schema = getattr(tool, 'parameters', None)
+    if params_schema is None:
+        return True
+    allowed_keys = set(params_schema.get('properties', {}).keys())
+    required_keys = set(params_schema.get('required', []))
+    if not set(args.keys()) <= allowed_keys:
+        return False
+    if not required_keys <= set(args.keys()):
+        return False
+    return True
+
+
 def parse_all_tools(output_text):
     """解析文本中所有 <tool_call>...</tool_call>，返回 [{"name", "arguments"}, ...]。"""
     parts = output_text.split(tool_start)
@@ -2514,7 +2547,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 round1_nwait = [0.0 for _ in range(num)]
                 raw_rewards = [1.0 for _ in range(num)] 
                 exceptions = [0.0 for _ in range(num)]
+                format_rewards = [0.0 for _ in range(num)]
             else: 
+                format_rewards = []
                 for iidx,(ret0,ret1) in enumerate(zip(round0_correctness, round1_correctness)):
                     # print('!!!! solution', sol)
                     if ret1 is None: ret = ret0
@@ -2533,7 +2568,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     norepeat_rewards.append(norepeat) 
                     usefmt_rewards.append(usefmt)
                     # ns_in_correct.append(0.0)
-                    raw_rewards.append(1.0 if final_correct>0 else 0.0)
+                    # acc: 格式正确且回答正确为1，否则为0
+                    raw_rewards.append(1.0 if final_correct > 0 else 0.0)
+                    # format_reward: 格式错误为-1，格式正确为0
+                    format_rewards.append(-1.0 if final_correct == -1.0 else 0.0)
                     exceptions.append(1.0 if final_correct<0 else 0.0)
                     
             # for valid, final_correct in zip(validity, raw_rewards):
@@ -2570,6 +2608,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             "norepeat": [0.0 if x is None else float(x) for x in norepeat_rewards],
             "usefmt": [0.0 if x is None else float(x) for x in usefmt_rewards],
             "match": [0.0 if x is None else float(x)  for x in raw_rewards],
+            "format_reward": [0.0 if x is None else float(x) for x in format_rewards],
+            "tool_format_reward": [float(x) for x in getattr(batched_sample, 'tool_format_rewards', [0.0] * len(raw_rewards))],
             "use_codes": [0.0 if x is None else float(x) for x in use_codes],
             # "num_switch": [float(x) for x in ns_in_correct],
             "round0_nwait": [float(x) for x in round0_nwait],
@@ -2697,7 +2737,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     # print('!!!! debug ', dump_info)
                     for i in range(num):
                         entry = dict()
-                        for k in ['solutions', 'gts', 'round0_correctness', 'round1_correctness','validity', 'reward', 'round1_nwait', 'round0_nwait',  'qids', 'questions', 'num_actions','curiosity','penalty']: # error_info, usefmt, use_codes
+                        for k in ['solutions', 'gts', 'round0_correctness', 'round1_correctness','validity', 'reward', 'match', 'format_reward', 'tool_format_reward', 'round1_nwait', 'round0_nwait',  'qids', 'questions', 'num_actions','curiosity','penalty']: # error_info, usefmt, use_codes
                             # if k=='sol': continue 
                             if k not in dump_info: continue 
                             if len(dump_info[k])!=num:
@@ -2712,9 +2752,20 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             stats_file = self.strategy.args.ckpt_path + '/logs/training_stats.txt'
 
             # 计算各指标的局部和与数量（用于多卡归一化）
+            # acc: 格式正确且回答正确为1，否则为0（回答错误或格式错误均为0）
             match_vals = [float(x) for x in info['match']]
             acc_sum = float(np.sum(match_vals))
             acc_count = float(len(match_vals))
+
+            # format_reward: 格式错误为-1，格式正确为0
+            format_reward_vals = [float(x) for x in info['format_reward']]
+            format_reward_sum = float(np.sum(format_reward_vals))
+            format_reward_count = float(len(format_reward_vals))
+
+            # tool_format_reward: 工具调用格式正确为0，格式错误为-1
+            tool_format_reward_vals = [float(x) for x in info['tool_format_reward']]
+            tool_format_reward_sum = float(np.sum(tool_format_reward_vals))
+            tool_format_reward_count = float(len(tool_format_reward_vals))
 
             reward_vals = info['reward']
             if isinstance(reward_vals, torch.Tensor):
@@ -2745,6 +2796,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
             local_stats = torch.tensor([
                 acc_sum, acc_count,
+                format_reward_sum, format_reward_count,
+                tool_format_reward_sum, tool_format_reward_count,
                 total_reward_sum, total_reward_count,
                 iou_sum, iou_count,
                 type_sum, type_count,
@@ -2758,6 +2811,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 global_stats = local_stats
 
             (acc_sum_g, acc_count_g,
+             format_reward_sum_g, format_reward_count_g,
+             tool_format_reward_sum_g, tool_format_reward_count_g,
              total_reward_sum_g, total_reward_count_g,
              iou_sum_g, iou_count_g,
              type_sum_g, type_count_g,
@@ -2768,6 +2823,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 return float(total / count) if count > 0 else 0.0
 
             acc = safe_mean(acc_sum_g, acc_count_g)
+            format_reward_mean = safe_mean(format_reward_sum_g, format_reward_count_g)
+            tool_format_reward_mean = safe_mean(tool_format_reward_sum_g, tool_format_reward_count_g)
             total_reward = safe_mean(total_reward_sum_g, total_reward_count_g)
             iou_reward = safe_mean(iou_sum_g, iou_count_g)
             anomaly_type_reward = safe_mean(type_sum_g, type_count_g)
@@ -2787,7 +2844,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 if getattr(self, '_batch_counter', 0) % 20 == 0:
                     print(
                         f'!!!! [Stats Debug] step={getattr(self, "_batch_counter", 0)}, '
-                        f'acc={acc:.4f}, total_reward={total_reward:.4f}, '
+                        f'acc={acc:.4f}, format_reward={format_reward_mean:.4f}, tool_format_reward={tool_format_reward_mean:.4f}, total_reward={total_reward:.4f}, '
                         f'iou_reward={iou_reward:.4f}, type_reward={anomaly_type_reward:.4f}, '
                         f'perceptual_reward={perceptual_reward:.4f}, '
                         f'bonus_reward={bonus_reward:.4f}'
@@ -2795,17 +2852,17 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
 
                 os.makedirs(os.path.dirname(stats_file), exist_ok=True)
                 with open(stats_file, 'a') as sf:
-                    # 如果是新文件，先写表头（7列）
+                    # 如果是新文件，先写表头（9列：acc + format_reward + tool_format_reward + 其余）
                     if not os.path.exists(stats_file) or os.path.getsize(stats_file) == 0:
-                        sf.write('# step\tacc\ttotal_reward\tiou_reward\ttype_reward\tperceptual_reward\tbonus\n')
+                        sf.write('# step\tacc\tformat_reward\ttool_format_reward\ttotal_reward\tiou_reward\ttype_reward\tperceptual_reward\tbonus\n')
 
                     # 获取当前step（batch计数器，每处理1个batch递增1）
                     current_step = getattr(self, '_batch_counter', 0)
                     self._batch_counter = current_step + 1
 
-                    # 写入数据（7列）
+                    # 写入数据（9列）：acc, format_reward, tool_format_reward(工具调用格式正确0/错误-1), 其余
                     sf.write(
-                        f'{current_step}\t{acc:.4f}\t{total_reward:.4f}\t{iou_reward:.4f}\t'
+                        f'{current_step}\t{acc:.4f}\t{format_reward_mean:.4f}\t{tool_format_reward_mean:.4f}\t{total_reward:.4f}\t{iou_reward:.4f}\t'
                         f'{anomaly_type_reward:.4f}\t{perceptual_reward:.4f}\t'
                         f'{bonus_reward:.4f}\n'
                     )
@@ -3146,6 +3203,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         final_error_flags = [False for _ in range(len(qids_expanded))]
         do_dump = (getattr(args, "training_mode", "train") in {'eval_only','train'}) and is_eval
         temp_error_flags = [False for _ in range(len(qids_expanded))]
+        # 工具调用格式错误标记：格式错误则后续统计为 tool_format_reward=-1，否则为 0
+        tool_format_error_flags = [False for _ in range(len(qids_expanded))]
         # 存储每个样本的bbox和IoU奖励（模型可能多次 crop，每个 bbox 放入列表，最后取并集与 gt 并集算 IoU）
         all_predicted_bboxes = [[] for _ in range(len(qids_expanded))]  # 每个元素为 list of [x1,y1,x2,y2]
         all_iou_rewards = [0.0] * len(qids_expanded)  # 存储IoU奖励
@@ -3205,6 +3264,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 temp_error_flags[out_idx] = False
                 # 只解析当前轮 assistant 回复中的工具调用，避免多轮时重复执行历史轮次的工具（如上一轮的 crop 与当前轮的 query_image 混在一起）
                 all_tool_params = parse_all_tools(rsp)
+                # 解析/块数层面：本应以 </tool_call> 结尾但解析为空，或有块 JSON 非法 → 记格式错误
+                if require_tool:
+                    parts = rsp.split(tool_start)
+                    n_blocks = sum(1 for p in parts[1:] if p.split(tool_end)[0].strip())
+                    if not all_tool_params or n_blocks > len(all_tool_params):
+                        tool_format_error_flags[out_idx] = True
+                # 在调用具体工具时，针对每个工具检查格式（name/arguments 结构 + 工具名合法 + arguments 符合该工具 schema，如 query_image 必须为 {}）
+                operations = getattr(self, 'operations', None)
                 added = []
                 if not all_tool_params:
                     msg_this.append(
@@ -3220,6 +3287,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         crop_proc_imgs = []
                         crop_paths = []
                         for ti, tool_params in enumerate(all_tool_params):
+                            if not _is_valid_tool_call_format(tool_params, operations):
+                                tool_format_error_flags[out_idx] = True
                             try:
                                 tool_name = tool_params['name']
                                 tool_args = tool_params['arguments']
@@ -3282,6 +3351,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     else:
                         # 混合或非 crop：按顺序执行每个工具，每个工具一条 user 消息
                         for ti, tool_params in enumerate(all_tool_params):
+                            if not _is_valid_tool_call_format(tool_params, operations):
+                                tool_format_error_flags[out_idx] = True
                             current_targetpath = f"{tfolder}/iter{niter}_{ti}.jpg"
                             tool_added = []
                             try:
@@ -3471,6 +3542,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         anomaly_type_bonus = []  # 新增：单独记录异常类型奖励
         perceptual_bonus = []  # 新增：单独记录感知奖励（基础正确性+IoU+Type）
         behavioral_bonus = []  # 新增：单独记录行为奖励（鼓励在不确定时调用query）
+        tool_format_rewards = []  # 工具调用格式奖励：格式正确 0，格式错误 -1
         
         # 🔍 保存 solutions_round0 的引用（用于提取 anomaly_type）
         all_solutions = solutions_round0
@@ -3521,6 +3593,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             this_type = []  # 新增：记录本组的异常类型奖励
             this_perceptual = []  # 新增：记录本组的感知奖励
             this_behavioral = []  # 新增：记录本组的行为奖励
+            this_tool_format = []  # 本组工具调用格式奖励
             for iidx, (mres, ncall, isvideo) in enumerate(zip(correctness, ntoolcalls,videoflags)):
                 global_idx = idx + iidx  # 全局索引
                 this_r = float(mres)
@@ -3775,6 +3848,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 this_type.append(anomaly_type_reward)  # 新增：保存异常类型奖励
                 this_perceptual.append(perceptual_reward)  # 新增：保存感知奖励
                 this_behavioral.append(behavioral_reward)  # 新增：保存行为奖励
+                # 工具调用格式奖励：格式正确 0，格式错误 -1
+                this_tool_format.append(-1.0 if tool_format_error_flags[global_idx] else 0.0)
                 
                 # 🔍 Debug：打印 type_reward
                 # if idx // nsample % 20 == 0 and iidx == 0:
@@ -3793,6 +3868,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             anomaly_type_bonus.extend(this_type)  # 新增：添加异常类型奖励到总列表
             perceptual_bonus.extend(this_perceptual)  # 新增：添加感知奖励到总列表
             behavioral_bonus.extend(this_behavioral)  # 新增：添加行为奖励到总列表
+            tool_format_rewards.extend(this_tool_format)
             uniformity.extend([float(is_uniform)]*nsample)
             if group_score<1./8.:
                 difficulty_labels.extend([0]*nsample)
@@ -4066,6 +4142,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     anomaly_type_bonus=anomaly_type_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
                     perceptual_bonus=perceptual_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
                     behavioral_bonus=behavioral_bonus[i : i + self.strategy.args.micro_rollout_batch_size],  # 新增
+                    tool_format_rewards=tool_format_rewards[i : i + self.strategy.args.micro_rollout_batch_size],
                 )
             )
 
