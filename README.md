@@ -30,6 +30,14 @@
 <sup>&Dagger;</sup>Correspondence.
 </span>
 
+## iad-binary-qa 训练与infer
+- 从hf上获取 train1600_notype_iad_qa_sft.json，test_notype_iad_qa_sft.json
+- sft训练：bash instruction_tuning/sft-iad-notype-qa.sh
+- infer: 
+   - cd curiosity_driven_rl
+   - bash scripts/eval_iad_notype_qa.sh
+- 脚本均需修改模型和数据路径
+
 ## opd训练脚本
 运行方法：
 - cd curiosity_driven_rl
