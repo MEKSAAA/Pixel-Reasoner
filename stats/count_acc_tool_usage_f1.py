@@ -285,10 +285,15 @@ def compute_accuracy_from_testjson(
         if "conv.json" in filenames:
             qid_to_conv[qid_here] = os.path.join(dirpath, "conv.json")
 
-    # 再以 test_json 中所有有 gt_answer 的样本为“分母”，
-    # 没有预测或无法解析预测的样本也计入 total_evaluated（视为预测错误）
+    # 分母为「实际测试的所有样本」：仅统计 eval 目录下存在 conv.json 且有 gt_answer 的样本；“分母”，
+    # 无法解析预测的样本仍计入分母，视为预测错误
     for qid, item in test_items.items():
         if not isinstance(item, dict) or "gt_answer" not in item:
+            continue
+
+        conv_path = qid_to_conv.get(qid)
+        if conv_path is None:
+            # 该样本在 eval 目录下没有 conv.json，未参与实际测试，不计入分母
             continue
 
         gt = bool(item.get("gt_answer"))
@@ -300,10 +305,7 @@ def compute_accuracy_from_testjson(
             category = source_from_item(item)
         category_total[category] += 1
 
-        pred: Optional[bool] = None
-        conv_path = qid_to_conv.get(qid)
-        if conv_path is not None:
-            pred = parse_conv_for_pred(conv_path)
+        pred: Optional[bool] = parse_conv_for_pred(conv_path)
 
         # 仅在成功解析出预测时，才统计“预测正确数”及 AUROC/F1 所需的标签
         if pred is not None:
