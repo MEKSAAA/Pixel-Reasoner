@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""统计指定目录下 JSON 日志中的工具调用次数，并从 testjson 的 gt_answer 计算准确率。支持三种统计口径，并包含详细的子目录统计。"""
+"""统计指定目录下 JSON 日志中的工具调用次数，并从 testjson 的 gt_answer 计算准确率。支持三种统计口径，并包含详细的子目录统计（含解析错误标注）。"""
 
 import argparse
 import json
@@ -207,6 +207,7 @@ def main():
     parser.add_argument("root", help="eval 目录")
     parser.add_argument("--test-json", required=True, help="test json 路径")
     parser.add_argument("--output", help="输出文件路径")
+    parser.add_argument("--per-file", action="store_true", help="输出每个样本的详细结果")
     args = parser.parse_args()
 
     if not os.path.isdir(args.root) or not os.path.isfile(args.test_json):
@@ -232,8 +233,8 @@ def main():
     }
     
     # 用于详细子目录统计
-    sample_results = {} # qid -> {counts, is_correct_str}
-    per_dir_summary = defaultdict(lambda: {"counts": {name: 0 for name in TOOL_NAMES}, "correct": 0, "total": 0})
+    sample_results = {} # qid -> {counts, status_str, top_dir}
+    per_dir_summary = defaultdict(lambda: {"counts": {name: 0 for name in TOOL_NAMES}, "correct": 0, "total": 0, "parse_error": 0})
 
     for qid, item in test_items.items():
         if not isinstance(item, dict) or "gt_answer" not in item:
@@ -260,20 +261,27 @@ def main():
         modes_data["mode3"][category][0].append(gt)
         modes_data["mode3"][category][1].append(int(pred) if pred is not None else 1 - gt)
 
-        # 详细统计逻辑 (基于 Mode 2 口径，即文件存在就算)
+        # 详细统计逻辑
         if conv_path:
-            is_correct = (pred == bool(gt)) if pred is not None else False
-            correct_str = "正确" if is_correct else ("无法解析" if pred is None else "错误")
-            sample_results[qid] = {"counts": counts, "correct_str": correct_str}
-            
-            # 按一级子目录汇总
             rel_dir = os.path.relpath(os.path.dirname(conv_path), root_abs)
             top_dir = rel_dir.split(os.sep)[0] if os.sep in rel_dir else rel_dir
+            
+            status_str = ""
+            if pred is None:
+                status_str = "解析错误"
+                per_dir_summary[top_dir]["parse_error"] += 1
+            elif pred == bool(gt):
+                status_str = "正确"
+                per_dir_summary[top_dir]["correct"] += 1
+            else:
+                status_str = "错误"
+            
+            sample_results[qid] = {"counts": counts, "status_str": status_str, "top_dir": top_dir}
+            
+            # 按一级子目录汇总
             for name in TOOL_NAMES:
                 per_dir_summary[top_dir]["counts"][name] += counts[name]
             per_dir_summary[top_dir]["total"] += 1
-            if is_correct:
-                per_dir_summary[top_dir]["correct"] += 1
 
     # 生成报告
     report_lines = []
@@ -323,9 +331,14 @@ def main():
     for top_dir in sorted(per_dir_summary.keys()):
         s = per_dir_summary[top_dir]
         acc_str = f"{s['correct']}/{s['total']} ({s['correct']/s['total']*100:.2f}%)" if s['total'] > 0 else "0/0"
-        report_lines.append(f"- {top_dir}: {format_counts(s['counts'])} | 判断正确: {acc_str}")
-        # 如果需要列出每个样本，可以在这里循环 sample_results，但通常只在 --per-file 时输出
-        # 这里为了保持简洁，只输出汇总，如果需要详细列表可以参考原脚本逻辑
+        parse_err_str = f" | 解析错误: {s['parse_error']}" if s['parse_error'] > 0 else ""
+        report_lines.append(f"- {top_dir}: {format_counts(s['counts'])} | 判断正确: {acc_str}{parse_err_str}")
+        
+        # 如果开启了 --per-file，输出该目录下每个样本的详细情况
+        if args.per_file:
+            for qid, res in sorted(sample_results.items()):
+                if res["top_dir"] == top_dir:
+                    report_lines.append(f"  - {qid}: {format_counts(res['counts'])} | {res['status_str']}")
 
     report = "\n".join(report_lines)
     print(report)
