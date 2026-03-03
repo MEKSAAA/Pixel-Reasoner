@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""统计指定目录下 JSON 日志中的工具调用次数，并从 testjson 的 gt_answer 计算准确率。支持三种统计口径，并包含详细的子目录统计（含解析错误标注）。"""
+"""统计指定目录下 JSON 日志中的工具调用次数，并从 testjson 的 gt_answer 计算准确率。支持三种统计口径，并包含详细的子目录统计（含解析错误标注）。
+口径二：有 conv.json 即统计；但凡有 conv 却未解析出 <answer> 中 anomaly_present 的均算解析失败，按错计入。"""
 
 import argparse
 import json
@@ -29,7 +30,8 @@ TOOL_NAME_PATTERNS = {
 }
 
 # 从回答中解析 <answer>{"anomaly_present": true/false, ...}</answer>
-ANSWER_PATTERN = re.compile(r"<answer>\s*(\{.*?\})\s*</answer>", re.DOTALL)
+# 用 (.*?) 取完整标签内容再 json.loads，避免 \{.*?\} 在第一个 } 处截断多字段 JSON
+ANSWER_PATTERN = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
 
 # 子文件夹命名：test_<类别>_<id>，例如 test_brain_8, test_chest_15631
 SAMPLE_DIR_PATTERN = re.compile(r"^test_(.+)_\d+$")
@@ -158,10 +160,18 @@ def parse_conv_for_pred(conv_path: str) -> Optional[bool]:
         data = json.loads(text)
     except (OSError, json.JSONDecodeError):
         return None
-    messages = data[0] if isinstance(data, list) and len(data) > 0 else data
+    try:
+        messages = data[0] if isinstance(data, list) and len(data) > 0 else data
+    except (TypeError, IndexError, KeyError):
+        # data 为 None、空列表、或 dict 等非常规结构时避免抛错，视为解析失败
+        return None
     if not isinstance(messages, list):
         return None
-    return _get_pred_anomaly_from_messages(messages)
+    try:
+        return _get_pred_anomaly_from_messages(messages)
+    except (TypeError, KeyError, IndexError, json.JSONDecodeError):
+        # 内容结构异常或 JSON 片段解析失败时仍算“解析失败”，不抛错
+        return None
 
 def load_test_items(test_json_path: str) -> Dict[str, dict]:
     text = read_text(test_json_path)
@@ -242,17 +252,20 @@ def main():
         gt = int(bool(item.get("gt_answer")))
         category = category_from_dirname(qid) or source_from_item(item)
         conv_path = qid_to_conv.get(qid)
-        pred = parse_conv_for_pred(conv_path) if conv_path else None
-        
-        # 工具统计
-        counts = scan_json_file(conv_path) if conv_path else {name: 0 for name in TOOL_NAMES}
-        
+        try:
+            pred = parse_conv_for_pred(conv_path) if conv_path else None
+            counts = scan_json_file(conv_path) if conv_path else {name: 0 for name in TOOL_NAMES}
+        except Exception:
+            # conv 存在但读取/解析过程抛错时，仍按“有文件、解析失败”处理，保证进入口径二
+            pred = None
+            counts = {name: 0 for name in TOOL_NAMES}
+
         # Mode 1: 解析成功
         if pred is not None:
             modes_data["mode1"][category][0].append(gt)
             modes_data["mode1"][category][1].append(int(pred))
 
-        # Mode 2: 文件存在
+        # Mode 2: 有 conv.json 即统计；但凡有 conv 却未解析出 <answer> 中 anomaly_present 的均算解析失败，按错算
         if conv_path:
             modes_data["mode2"][category][0].append(gt)
             modes_data["mode2"][category][1].append(int(pred) if pred is not None else 1 - gt)
@@ -265,7 +278,8 @@ def main():
         if conv_path:
             rel_dir = os.path.relpath(os.path.dirname(conv_path), root_abs)
             top_dir = rel_dir.split(os.sep)[0] if os.sep in rel_dir else rel_dir
-            
+
+            # 有 conv 但未解析出 anomaly_present 的均标为解析失败，仍计入口径二
             status_str = ""
             if pred is None:
                 status_str = "解析错误"
@@ -275,9 +289,9 @@ def main():
                 per_dir_summary[top_dir]["correct"] += 1
             else:
                 status_str = "错误"
-            
+
             sample_results[qid] = {"counts": counts, "status_str": status_str, "top_dir": top_dir}
-            
+
             # 按一级子目录汇总
             for name in TOOL_NAMES:
                 per_dir_summary[top_dir]["counts"][name] += counts[name]
@@ -309,7 +323,7 @@ def main():
         report_lines.append("")
 
     add_mode_report("1. 解析成功 (能解析出 <answer>)", "mode1")
-    add_mode_report("2. 文件存在 (有 conv.json，解析失败算错)", "mode2")
+    add_mode_report("2. 文件存在 (有 conv.json 即统计；未解析出 <answer> 中 anomaly_present 的算解析失败、按错)", "mode2")
     add_mode_report("3. 全部样本 (包含未生成文件的样本，算错)", "mode3")
 
     # 工具统计
