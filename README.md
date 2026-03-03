@@ -36,7 +36,9 @@
 - infer: 
    - cd curiosity_driven_rl
    - bash scripts/eval_iad_notype_qa.sh
-- 脚本均需修改模型和数据路径
+- bash脚本均需修改模型和数据路径
+- 统计脚本：
+- python stats/cal_iad_notype_qa_acc.py --gt /.../train1600_notype_iad_qa_sft.json --log-dir /.../logs/dumps_iter0 -o iad_notype_qa_results.json
 
 ## opd训练脚本
 运行方法：
