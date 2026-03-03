@@ -3,8 +3,8 @@ export working_dir="/NEW_EDS/miaojw/projects/Pixel-Reasoner/curiosity_driven_rl"
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export temperature=1.0
 
-export trainver="/NEW_EDS/miaojw/projects/agentiad-03/binary-brain/train-btmri-grpo-300.json"
-export testver="/NEW_EDS/miaojw/projects/agentiad-03/binary-brain/test-btmri.json"
+export trainver="/NEW_EDS/miaojw/projects/AgentIAD/train300-opd-med-general-sys.json"
+export testver="/NEW_EDS/miaojw/projects/AgentIAD/test-btmri-general-sys.json"
 
 export filter=True # filtering zero advantages
 export algo=group # default for grpo
@@ -55,6 +55,7 @@ export NCCL_DEBUG=warn
 
 export LAOZHANG_API_KEY="sk-CR8zGpArpDAF1IkyE55181D2285f47Ee867244548262977d"
 export ZHIPU_API_KEY="03ef23a3717f4890b3458c8434b302a1.KrauNDJb3Jvrr3KV"
+export DASHSCOPE_API_KEY="sk-71dbfa5602194275a39f296f745332d7"
 
 
 unset PYTORCH_CUDA_ALLOC_CONF

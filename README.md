@@ -30,6 +30,13 @@
 <sup>&Dagger;</sup>Correspondence.
 </span>
 
+## opd训练脚本
+运行方法：
+- cd curiosity_driven_rl
+- bash scripts/train_opd.sh
+- 需要从huggingface上下载train300-opd-med-general-sys.json和test-btmri-general-sys.json
+- train_opd.sh中需要修改trainver, testver, policy, ref_policy
+
 ## 数据统计
 Pixel-Reasoner/stats/count_acc_tool_usage_f1.py
 
