@@ -211,12 +211,30 @@ class SFT_DATASET(Dataset):
     def __getitem__(self, i):
         return self.data[i]
 
+def _is_qwen_model(model_id: str) -> bool:
+    """判断是否为 Qwen 系列模型：HF 名称含 Qwen，或本地路径的 config 里 model_type 含 qwen."""
+    if "Qwen" in model_id:
+        return True
+    config_path = os.path.join(model_id, "config.json")
+    if os.path.isfile(config_path):
+        try:
+            cfg = json.load(open(config_path))
+            model_type = cfg.get("model_type", "") or cfg.get("architectures", [""])
+            if isinstance(model_type, list):
+                model_type = model_type[0] if model_type else ""
+            if "qwen" in str(model_type).lower():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def main(script_args, training_args, model_args):
     # import pdb; pdb.set_trace()  # 断点1: main函数入口，查看所有参数
 
     model_id = model_args.model_name_or_path
 
-    if "Qwen" in model_id:
+    if _is_qwen_model(model_id):
         from vlm_modules.qwen_module import Qwen2VLModule
         vlm_module = Qwen2VLModule()
 
