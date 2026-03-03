@@ -285,8 +285,8 @@ def compute_accuracy_from_testjson(
         if "conv.json" in filenames:
             qid_to_conv[qid_here] = os.path.join(dirpath, "conv.json")
 
-    # 分母为「实际测试的所有样本」：仅统计 eval 目录下存在 conv.json 且有 gt_answer 的样本；“分母”，
-    # 无法解析预测的样本仍计入分母，视为预测错误
+    # 分母为「成功解析出预测值的样本」：仅统计 eval 目录下存在 conv.json、有 gt_answer、且能解析出 pred 的样本；
+    # 无法解析预测的样本不计入分母（准确率与 F1/AUROC 口径对齐）
     for qid, item in test_items.items():
         if not isinstance(item, dict) or "gt_answer" not in item:
             continue
@@ -297,32 +297,35 @@ def compute_accuracy_from_testjson(
             continue
 
         gt = bool(item.get("gt_answer"))
-        total_evaluated += 1
 
         # 类别：优先从 qid 解析（如 test_brain_8 -> brain），否则从条目 id/image 路径取
         category = category_from_dirname(qid)
         if category is None:
             category = source_from_item(item)
-        category_total[category] += 1
 
         pred: Optional[bool] = parse_conv_for_pred(conv_path)
 
-        # 仅在成功解析出预测时，才统计“预测正确数”及 AUROC/F1 所需的标签
-        if pred is not None:
+        # 无法解析出预测值的样本不计入分母（准确率与 F1/AUROC 口径对齐）
+        if pred is None:
+            continue
+
+        total_evaluated += 1
+        category_total[category] += 1
+
+        if gt == pred:
+            total_correct += 1
+            category_correct[category] += 1
+
+        # 收集 AUROC/F1 数据：(y_true, y_pred)，pred 作为 0/1 标签
+        category_auroc_data[category][0].append(int(gt))
+        category_auroc_data[category][1].append(int(pred))
+
+        # topdir（一级子目录）统计：只对有 conv.json 的样本统计 per-dir accuracy
+        top_dir = qid_to_topdir.get(qid)
+        if top_dir is not None:
+            topdir_total[top_dir] += 1
             if gt == pred:
-                total_correct += 1
-                category_correct[category] += 1
-
-            # 收集 AUROC/F1 数据：(y_true, y_pred)，pred 作为 0/1 标签
-            category_auroc_data[category][0].append(int(gt))
-            category_auroc_data[category][1].append(int(pred))
-
-            # topdir（一级子目录）统计：只对有 conv.json 的样本统计 per-dir accuracy
-            top_dir = qid_to_topdir.get(qid)
-            if top_dir is not None:
-                topdir_total[top_dir] += 1
-                if gt == pred:
-                    topdir_correct[top_dir] += 1
+                topdir_correct[top_dir] += 1
 
     category_stats: Dict[str, Dict] = {}
     for cat in sorted(category_total.keys()):
