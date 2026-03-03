@@ -36,6 +36,9 @@ Pixel-Reasoner/stats/count_acc_tool_usage_f1.py
 
 使用方法：python count_acc_tool_usage_f1.py /NEW_EDS/.../eval/eval_3biadsft_btmri/logs/dumps_iter0 --test-json /NEW_EDS/.../mix-test8000.json
 
+## sft训练脚本
+- `sft-cvpr-on-med.sh`: 基于cvpr的模型在只有med的数据(med system prompt)上做sft，训练数据是med-sft-med-sys.json
+
 
 ## 🔥News
 - [2025/5/25] We made really fun demos! You can now play with the [**online demo**](https://huggingface.co/spaces/TIGER-Lab/Pixel-Reasoner). Have fun!
