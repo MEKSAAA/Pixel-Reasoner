@@ -1,9 +1,12 @@
+import base64
 import os
+import tempfile
 import time
 from abc import ABC
 from copy import deepcopy, copy
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Union, Dict
+from pathlib import Path
+from typing import List, Optional, Tuple, Union, Dict, Any
 
 import ray
 import torch
@@ -260,6 +263,49 @@ STRICT OUTPUT RULES:
 - No bullet points. No extra formatting. No headings.
 """.strip()
 
+# Image search (DashScope): used when qid does NOT contain "brain"
+IMAGE_SEARCH_MODEL = os.environ.get("IMAGE_SEARCH_MODEL", "qwen3.5-plus")
+IMAGE_SEARCH_MAX_IMAGES = 3
+
+IMAGE_SEARCH_SYSTEM_PROMPT = """
+You are a professional industrial visual inspection expert.
+You will be given raw image-search results: the search query, the upstream model's analysis (if any), and a list of retrieved image titles and URLs.
+Based ONLY on the provided content, generate a concise visual summary that describes what these reference images suggest or how they relate to the query.
+OUTPUT IN ENGLISH.
+
+REQUIRED OUTPUT FORMAT (use exactly these labels, one per line):
+Object: <object class or product name>
+Candidate Anomaly Types: <type1>, <type2>, ...
+
+Then add 2-3 sentences (50-80 words max) describing the most relevant observable or comparative characteristics. Mention only the most relevant visual cues.
+
+STRICT OUTPUT RULES:
+- Start your response DIRECTLY with the format above (Object:, Candidate Anomaly Types:). No opening phrase whatsoever.
+- Do NOT output any opening sentence, greeting, preamble, or introductory phrase such as 'Of course', 'Here is', 'Sure', 'Below is', 'Certainly', or any similar expression.
+- Do NOT output any analytical, interpretive, or meta commentary.
+- No reasoning. No interpretation. No speculation. No explanation.
+- No mention of search. No conclusions. No safety notes.
+""".strip()
+
+
+def _image_path_to_data_url(image_path: str) -> str:
+    """将本地图片路径转换为 base64 data URL"""
+    if not image_path or not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+    ext = Path(image_path).suffix.lower()
+    mime_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+    mime_type = mime_types.get(ext, "image/jpeg")
+    with open(image_path, "rb") as f:
+        image_data = f.read()
+        base64_data = base64.b64encode(image_data).decode("utf-8")
+    return f"data:{mime_type};base64,{base64_data}"
+
 
 @register_tool("search")
 class GenerateVisualDescriptionTool(BaseTool):
@@ -290,6 +336,7 @@ Output is one dense paragraph of observable visual characteristics only.
         openai_api_key: Optional[str] = None,
         base_url: str = "https://api.laozhang.ai/v1",
         model: str = "gpt-4o-mini",
+        dashscope_api_key: Optional[str] = None,
     ):
         super().__init__()
         if not _ZHIPU_AVAILABLE:
@@ -313,61 +360,164 @@ Output is one dense paragraph of observable visual characteristics only.
             )
         self.client = OpenAI(api_key=self.openai_api_key, base_url=base_url)
         self.model = model
+        # DashScope client for image search (when qid does not contain "brain")
+        self.dashscope_api_key = dashscope_api_key or os.getenv("DASHSCOPE_API_KEY")
+        self.dashscope_client = None
+        if self.dashscope_api_key:
+            self.dashscope_client = OpenAI(
+                api_key=self.dashscope_api_key,
+                base_url="https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1",
+            )
 
-    def call(self, description: str) -> str:
-        """Step 1: Zhipu web_search for real results. Step 2: LLM formats into concise visual description."""
-        if not description or not description.strip():
-            return "No description provided."
-
-        # Step 1: Zhipu web_search
+    def _call_image_search_dashscope(self, description: str, image_path: str) -> str:
+        """DashScope 图搜图：以当前图片 + query 检索，再用 LLM 做简洁摘要。只返回文本。"""
+        if not self.dashscope_client:
+            return "Image search is unavailable: DASHSCOPE_API_KEY is not set."
+        if not image_path or not os.path.exists(image_path):
+            return "Image search failed: image file not found."
+        query = (description or "").strip() or "This object and its typical anomaly or defect types"
         try:
-            resp = self.zhipu_client.web_search.web_search(
-                search_engine="search_pro",
-                search_query=description.strip(),
-                count=3,
-                content_size="high",
+            data_url = _image_path_to_data_url(image_path)
+        except Exception as e:
+            return f"Image search failed: {e}"
+        input_content = [
+            {"type": "input_text", "text": query},
+            {"type": "input_image", "image_url": data_url},
+        ]
+        try:
+            responses_api = getattr(self.dashscope_client, "responses", None)
+            if responses_api is None:
+                return "Image search unavailable: DashScope compatible-mode client requires .responses API (e.g. dashscope SDK)."
+            response = responses_api.create(
+                model=IMAGE_SEARCH_MODEL,
+                input=[{"role": "user", "content": input_content}],
+                tools=[{"type": "image_search"}],
             )
         except Exception as e:
-            return f"Web search failed: {e}"
-
-        results = getattr(resp, "search_result", None) or []
-        if not results:
-            return "No relevant content found in search results."
-
-        snippets = []
-        for i, item in enumerate(results, 1):
-            if isinstance(item, dict):
-                title = item.get("title", "")
-                link = item.get("link", "")
-                media = item.get("media", "")
-                publish_date = item.get("publish_date", "")
-                content = item.get("content", "").strip()
-            else:
-                title = getattr(item, "title", "")
-                link = getattr(item, "link", "")
-                media = getattr(item, "media", "")
-                publish_date = getattr(item, "publish_date", "")
-                content = getattr(item, "content", "").strip()
-            if logger.isEnabledFor(10):  # DEBUG
-                logger.debug("  [%d] %s | %s | %s | %s", i, title, media, publish_date, link)
-            if content:
-                snippets.append(f"[ref_{i}] {content}")
-
-        raw_content = "\n\n".join(snippets)
-        user_prompt = f"Search query: {description.strip()}\n\nSearch results:\n{raw_content}"
-
+            return f"Image search API error: {e}"
+        raw_parts: List[str] = []
+        output_text = getattr(response, "output_text", None) or ""
+        if output_text and isinstance(output_text, str) and output_text.strip():
+            raw_parts.append("Upstream model analysis:\n" + output_text.strip())
+        for item in getattr(response, "output", []) or []:
+            item_type = getattr(item, "type", "")
+            if item_type == "image_search_call":
+                raw = getattr(item, "output", None)
+                if raw is None:
+                    continue
+                try:
+                    images = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(images, list):
+                    continue
+                raw_parts.append(f"\nRetrieved images (top {IMAGE_SEARCH_MAX_IMAGES}):")
+                for i, img in enumerate(images[:IMAGE_SEARCH_MAX_IMAGES], 1):
+                    if isinstance(img, dict):
+                        title = img.get("title", "")
+                        url = img.get("url", "")
+                        raw_parts.append(f"  [{i}] {title}\n      URL: {url}")
+                    else:
+                        raw_parts.append(f"  [{i}] {img}")
+        raw_content = "\n".join(raw_parts).strip() if raw_parts else ""
+        if not raw_content:
+            return "Image search returned no results or analysis."
+        user_prompt = f"Image search query: {query}\n\nRaw image search results:\n{raw_content}"
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 temperature=0.3,
                 messages=[
-                    {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
+                    {"role": "system", "content": IMAGE_SEARCH_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
             )
             return (completion.choices[0].message.content or "").strip()
         except Exception as e:
-            return f"Search tool failed: {e}"
+            return raw_content + f"\n\n(Summary failed: {e})"
+
+    def call(
+        self,
+        description: str,
+        qid: Optional[str] = None,
+        image_path: Optional[str] = None,
+        image: Any = None,
+    ) -> str:
+        """
+        若 qid 包含 'brain'：使用 Zhipu web_search + LLM 格式化为视觉描述。
+        否则：使用 DashScope 图搜图 + LLM 摘要（需要 image_path 或 image）。
+        """
+        description = (description or "").strip()
+
+        use_brain = qid is not None and "brain" in str(qid).lower()
+        # use_brain = True
+
+        if use_brain:
+            # 现有逻辑：Zhipu web_search + LLM 格式化
+            try:
+                resp = self.zhipu_client.web_search.web_search(
+                    search_engine="search_pro",
+                    search_query=description,
+                    count=3,
+                    content_size="high",
+                )
+            except Exception as e:
+                return f"Web search failed: {e}"
+            results = getattr(resp, "search_result", None) or []
+            if not results:
+                return "No relevant content found in search results."
+            snippets = []
+            for i, item in enumerate(results, 1):
+                if isinstance(item, dict):
+                    content = item.get("content", "").strip()
+                else:
+                    content = getattr(item, "content", "").strip()
+                if content:
+                    snippets.append(f"[ref_{i}] {content}")
+            raw_content = "\n\n".join(snippets)
+            user_prompt = f"Search query: {description}\n\nSearch results:\n{raw_content}"
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0.3,
+                    messages=[
+                        {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                return (completion.choices[0].message.content or "").strip()
+            except Exception as e:
+                return f"Search tool failed: {e}"
+
+        # 非 brain：DashScope 图搜图，需要图片路径
+        path_to_use = image_path
+        if not path_to_use and image is not None:
+            if isinstance(image, Image.Image):
+                fd, path_to_use = tempfile.mkstemp(suffix=".jpg")
+                try:
+                    os.close(fd)
+                    image.convert("RGB").save(path_to_use, "JPEG", quality=85)
+                except Exception as e:
+                    if os.path.exists(path_to_use):
+                        try:
+                            os.remove(path_to_use)
+                        except Exception:
+                            pass
+                    return f"Image search failed: could not save image ({e})"
+            else:
+                path_to_use = None
+        if not path_to_use:
+            return "Image search failed: no image path or image provided for non-brain search."
+        try:
+            result = self._call_image_search_dashscope(description, path_to_use)
+        finally:
+            if path_to_use and image is not None and isinstance(image, Image.Image):
+                if os.path.exists(path_to_use):
+                    try:
+                        os.remove(path_to_use)
+                    except Exception:
+                        pass
+        return result
 
 
 def extract_qwen_query_and_response(input_text):
@@ -1749,7 +1899,11 @@ def execute_tool(images, rawimages, args, toolname, is_video, function=None, qid
         description = args.get('description', '')
         if function is None:
             raise RuntimeError("Execution Error: search handler is not available.")
-        return function(description=description)
+        # 非 brain 时需传入当前样本图片；brain 时仅需 description
+        first_image = None
+        if not is_video and images and len(images) > 0:
+            first_image = images[0]
+        return function(description=description, qid=qid, image=first_image)
     elif toolname=='query_image':
         if q2similar_templates is None or qid is None:
             assert False, "Execution Error: `query_image` requires qid and q2similar_templates to be provided."
