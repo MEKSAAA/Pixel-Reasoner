@@ -30,6 +30,9 @@
 <sup>&Dagger;</sup>Correspondence.
 </span>
 
+## 测mmad qa的anomaly discrimination 按照正常和异常均值
+- python cal_adis_avg_qa.py --gt /NEW_EDS/miaojw/projects/agentiad-03/build-qa-testset/test_mmad_qa.json --log_dir /NEW_EDS/miaojw/projects/agentiad-02/eval/eval_3b_mmad/logs/dumps_iter0
+
 ## iad-binary-qa 训练与infer
 - 从hf上获取 train1600_notype_iad_qa_sft.json，test_notype_iad_qa_sft.json
 - sft训练：bash instruction_tuning/sft-iad-notype-qa.sh
