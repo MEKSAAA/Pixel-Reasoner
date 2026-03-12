@@ -277,7 +277,6 @@ REQUIRED OUTPUT FORMAT (use exactly these labels, one per line):
 Object: <object class or product name>
 Candidate Anomaly Types: <type1>, <type2>, ...
 
-Then add 2-3 sentences (50-80 words max) describing the most relevant observable or comparative characteristics. Mention only the most relevant visual cues.
 
 STRICT OUTPUT RULES:
 - Start your response DIRECTLY with the format above (Object:, Candidate Anomaly Types:). No opening phrase whatsoever.
@@ -3084,6 +3083,8 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             all_messages.extend([newm]*nsample)
             all_raw_messages.extend([m]*nsample)
             
+        # 每个样本的纯模型推理时间累计（从模型收到问题到输出答案，不含工具执行）
+        all_inference_times = [0.0] * len(qids_expanded) if qids_expanded else []
         
         if is_eval or not skip_generation:
             
@@ -3107,6 +3108,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             all_vllm_inputs = dict()
             all_uids = []
             all_video_flags = []
+            t_infer_start = time.perf_counter()
             for i, llm in enumerate(llms):
                 messages = all_messages[i * batch_size : (i + 1) * batch_size]
                 if not messages:
@@ -3179,7 +3181,12 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             if flag and rearrange_indices:
                 print('!!!! output fetched', rearrange_indices)
                 all_outputs = [all_outputs[i] for i in rearrange_indices]
-        
+            # 首轮推理时间：从提交到拿到输出（仅模型时间）
+            t_infer_end = time.perf_counter()
+            if all_inference_times:
+                round0_sec = t_infer_end - t_infer_start
+                for idx in range(len(all_inference_times)):
+                    all_inference_times[idx] += round0_sec
         print(f"===> [verbose] decode and evaluate the initial round of responses")
         
         idx2uid = all_uids
@@ -3489,7 +3496,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             print(f'===> [vllm] tool-call@iter{niter} requests {len(req_vllminputs)}/{len(all_flags)} messages, bsz_each={batch_size}=nqa, numllm={len(llms)}')
             
             reqs = []
-            
+            t_round_start = time.perf_counter()
             for i, llm in enumerate(llms):
                 vllm_inputs = req_vllminputs[i * batch_size : (i + 1) * batch_size] # dict(prompt, multimodal_data)
                 tmp_params = copy(sampling_params)
@@ -3507,6 +3514,11 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             for i, llm in enumerate(llms):
                 new_output_refs.append(llm.get_responses.remote(rank))
             new_outputs = sum(ray.get(new_output_refs), [])
+            t_round_end = time.perf_counter()
+            round_sec = t_round_end - t_round_start
+            for old_idx in req_indexlist:
+                if old_idx < len(all_inference_times):
+                    all_inference_times[old_idx] += round_sec
             
             print(f"===> [verbose] decode the new tool-executed responses ")
             new_tokens_in = [list(out.prompt_token_ids) for out in new_outputs]
@@ -3528,6 +3540,22 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             
         # peek the responses 
         torch.distributed.barrier()
+        
+        # 将每个样本的推理时间（仅模型收到问题到输出答案）及是否调用 search 写入 txt
+        # 每批（每次 _generate_vllm）追加写入，表头仅在文件不存在或为空时写一次，保证全量 eval 后 txt 含所有样本
+        if all_inference_times and qids_expanded and rank == 0:
+            log_dir = Path(self.strategy.args.ckpt_path) / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            out_path = log_dir / f"inference_times_step{self.eval_step}.txt"
+            write_header = not out_path.exists() or out_path.stat().st_size == 0
+            with open(out_path, "a", encoding="utf-8") as f:
+                if write_header:
+                    f.write("qid\tinference_time_sec\tused_search\n")
+                for i, qqid in enumerate(qids_expanded):
+                    sec = all_inference_times[i] if i < len(all_inference_times) else 0.0
+                    used_search = "yes" if (i < len(all_has_search_call) and all_has_search_call[i]) else "no"
+                    f.write(f"{qqid}\t{sec:.4f}\t{used_search}\n")
+            print(f"===> [inference_times] appended {len(qids_expanded)} records to {out_path}")
         
         rets_round1 = self.convenient_get_batch_rewards_from_queries(all_qa_texts, qids_expanded)
         difficulty_labels = []
